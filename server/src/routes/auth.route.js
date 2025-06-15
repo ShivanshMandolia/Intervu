@@ -1,4 +1,3 @@
-
 import { Router } from "express";
 import { registerUser,loginUser,logoutUser,refreshAccessToken,changeCurrentPassword } from "../controllers/auth.controller.js";
 import  {verifyJWT} from "../middlewares/auth.middleware.js"
