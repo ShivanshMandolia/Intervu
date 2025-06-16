@@ -1,4 +1,3 @@
-// backend/socket/socketServer.js
 import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 import { User } from "../models/user.model.js";
@@ -12,6 +11,9 @@ class SocketServer {
     this.socketIdToEmailMap = new Map();
     this.socketIdToUserMap = new Map();
     this.roomToSocketsMap = new Map(); // roomId -> Set of socketIds
+    this.roomJoinLocks = new Map(); // roomId -> promise to prevent race conditions
+    this.userRoomMap = new Map(); // socketId -> roomId to track current rooms
+    this.roomStates = new Map(); // roomId -> { code, language, input, lastCompilation }
   }
 
   initialize(server) {
@@ -65,8 +67,11 @@ class SocketServer {
       this.handleCallAccepted(socket);
       this.handleCallRejected(socket);
       this.handlePeerNegotiation(socket);
+      this.handleWebRTCEvents(socket);
       this.handleChatMessage(socket);
       this.handleCodeUpdate(socket);
+      this.handleInputUpdate(socket); // New: Handle shared input
+      this.handleCompilation(socket); // New: Handle shared compilation
       this.handleRecordingEvents(socket);
       this.handleDisconnection(socket);
     });
@@ -74,108 +79,300 @@ class SocketServer {
     console.log("🚀 Socket.IO server initialized");
   }
 
-  handleRoomJoin(socket) {
-    socket.on("room:join", async (data) => {
-      try {
-        console.log(`🔍 Room join attempt:`, {
-          roomId: data.roomId,
-          userId: socket.userId,
-          userEmail: socket.userEmail
-        });
+  normalizeRoomId(roomId) {
+    if (!roomId) return null;
+    
+    if (typeof roomId === 'object') {
+      console.warn('⚠️ Received object as roomId:', roomId);
+      return null;
+    }
+    
+    const cleanId = roomId.toString().trim();
+    if (!cleanId) return null;
+    
+    return cleanId;
+  }
 
-        const { roomId } = data;
+  async findRoomByAnyId(roomId) {
+    if (!roomId) return null;
+
+    try {
+      let room = await Room.findOne({ roomId: roomId }).populate('participants', 'email username');
+      
+      if (!room) {
+        const withPrefix = roomId.startsWith('room-') ? roomId : `room-${roomId}`;
+        room = await Room.findOne({ roomId: withPrefix }).populate('participants', 'email username');
+      }
+      
+      return room;
+    } catch (error) {
+      console.error('❌ Error finding room:', error);
+      return null;
+    }
+  }
+
+// Fixed checkRoomCapacity function
+async checkRoomCapacity(roomId, userId) {
+  try {
+    const room = await this.findRoomByAnyId(roomId);
+    if (!room) return { canJoin: true, reason: null };
+
+    // Check if user is already a participant or creator FIRST
+    const isExistingParticipant = room.participants.some(p => 
+      p._id.toString() === userId.toString()
+    );
+    const isCreator = room.createdBy && room.createdBy._id.toString() === userId.toString();
+
+    if (isExistingParticipant || isCreator) {
+      console.log(`✅ User ${userId} is existing participant or creator - allowing rejoin`);
+      return { canJoin: true, reason: null };
+    }
+
+    // For NEW participants, check capacity
+    // Count unique participants (avoid double counting)
+    const dbParticipantCount = room.participants ? room.participants.length : 0;
+    const socketParticipantCount = this.roomToSocketsMap.get(roomId)?.size || 0;
+    
+    // Use DB count as primary source of truth for capacity
+    const currentParticipants = dbParticipantCount;
+    
+    console.log(`🔍 Room capacity check for ${roomId}:`, {
+      maxParticipants: room.maxParticipants,
+      dbParticipants: dbParticipantCount,
+      socketParticipants: socketParticipantCount,
+      currentParticipants,
+      userId: userId.toString(),
+      isNewUser: true
+    });
+
+    // Check capacity for new participants
+    if (currentParticipants >= room.maxParticipants) {
+      console.log(`❌ Room ${roomId} is full: ${currentParticipants}/${room.maxParticipants}`);
+      return { 
+        canJoin: false, 
+        reason: `Room is full (${currentParticipants}/${room.maxParticipants} participants)`,
+        code: "ROOM_FULL"
+      };
+    }
+
+    console.log(`✅ Room ${roomId} has space: ${currentParticipants}/${room.maxParticipants}`);
+    return { canJoin: true, reason: null };
+  } catch (error) {
+    console.error('❌ Error checking room capacity:', error);
+    return { canJoin: false, reason: 'Error checking room capacity' };
+  }
+}
+
+  async findOrCreateRoom(roomId, userId) {
+    const normalizedRoomId = this.normalizeRoomId(roomId);
+    
+    if (!normalizedRoomId) {
+      throw new Error('Invalid room ID provided');
+    }
+
+    // Use a lock to prevent race conditions
+    if (this.roomJoinLocks.has(normalizedRoomId)) {
+      await this.roomJoinLocks.get(normalizedRoomId);
+      return await this.findRoomByAnyId(normalizedRoomId);
+    }
+
+    const lockPromise = this.findOrCreateRoomInternal(normalizedRoomId, userId);
+    this.roomJoinLocks.set(normalizedRoomId, lockPromise);
+    
+    try {
+      const room = await lockPromise;
+      return room;
+    } finally {
+      this.roomJoinLocks.delete(normalizedRoomId);
+    }
+  }
+
+  async findOrCreateRoomInternal(roomId, userId) {
+    let room = await this.findRoomByAnyId(roomId);
+    
+    if (!room) {
+      console.log(`🏗️ Creating new room: ${roomId}`);
+      try {
+        room = new Room({
+          roomId,
+          name: `Room ${roomId.replace('room-', '')}`,
+          createdBy: userId,
+          participants: [userId],
+          maxParticipants: 2 // Explicitly set to 2
+        });
+        await room.save();
         
-        if (!roomId) {
-          socket.emit("room:error", { message: "Room ID is required" });
+        room = await Room.findOne({ roomId })
+          .populate('createdBy', 'email username')
+          .populate('participants', 'email username');
+          
+        console.log(`✅ Room created successfully: ${roomId} with max participants: 2`);
+      } catch (error) {
+        if (error.code === 11000) {
+          console.log(`📋 Room already exists, fetching: ${roomId}`);
+          room = await this.findRoomByAnyId(roomId);
+        } else {
+          throw error;
+        }
+      }
+    }
+    
+    return room;
+  }
+
+  handleRoomJoin(socket) {
+  socket.on("room:join", async (data) => {
+    try {
+      const { roomId: originalRoomId } = data;
+      
+      if (!originalRoomId) {
+        socket.emit("room:error", { message: "Room ID is required" });
+        return;
+      }
+
+      const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+      
+      if (!normalizedRoomId) {
+        socket.emit("room:error", { message: "Invalid room ID format" });
+        return;
+      }
+
+      console.log(`🔍 Room join attempt:`, {
+        socketId: socket.id,
+        originalRoomId: originalRoomId,
+        normalizedRoomId: normalizedRoomId,
+        userId: socket.userId,
+        userEmail: socket.userEmail
+      });
+
+      // Check if user is already in this room (socket level)
+      const currentRoom = this.userRoomMap.get(socket.id);
+      if (currentRoom === normalizedRoomId) {
+        console.log(`🔄 User ${socket.userEmail} already in room ${normalizedRoomId} - sending current state`);
+        
+        const roomSockets = this.getRoomParticipants(normalizedRoomId)
+          .filter(p => p.socketId !== socket.id && p.user);
+        
+        const roomState = this.roomStates.get(normalizedRoomId) || {};
+        
+        socket.emit("room:joined", {
+          roomId: normalizedRoomId,
+          participants: roomSockets,
+          room: await this.findRoomByAnyId(normalizedRoomId),
+          roomState: roomState
+        });
+        return;
+      }
+
+      // Leave current room if in one
+      if (currentRoom) {
+        console.log(`🚪 Leaving current room: ${currentRoom}`);
+        this.leaveRoom(socket, currentRoom);
+      }
+
+      // **FIXED CAPACITY CHECK**
+      const capacityCheck = await this.checkRoomCapacity(normalizedRoomId, socket.userId);
+      if (!capacityCheck.canJoin) {
+        console.log(`🚫 Room join denied: ${capacityCheck.reason}`);
+        socket.emit("room:error", { 
+          message: capacityCheck.reason,
+          code: capacityCheck.code || "ROOM_FULL"
+        });
+        return;
+      }
+      
+      let room = await this.findOrCreateRoom(normalizedRoomId, socket.userId);
+      
+      if (!room) {
+        socket.emit("room:error", { message: "Failed to create or find room" });
+        return;
+      }
+
+      // **FIXED: Better participant management**
+      const isParticipant = room.participants.some(p => p._id.toString() === socket.userId.toString());
+      const isCreator = room.createdBy && room.createdBy._id.toString() === socket.userId.toString();
+      
+      if (!isParticipant && !isCreator) {
+        // Final capacity check before DB update
+        if (room.participants.length >= room.maxParticipants) {
+          socket.emit("room:error", { 
+            message: `Room is full (${room.participants.length}/${room.maxParticipants} participants)`,
+            code: "ROOM_FULL"
+          });
           return;
         }
+
+        room.participants.push(socket.userId);
+        await room.save();
         
-        console.log(`🔍 Looking for room with roomId: ${roomId}`);
-        let room = await Room.findOne({ roomId }).populate('participants', 'email username');
-        
-        // If room doesn't exist, create it
-        if (!room) {
-          console.log(`🏗️ Creating new room: ${roomId}`);
-          room = new Room({
-            roomId,
-            name: `Room ${roomId}`,
-            createdBy: socket.userId,
-            participants: [socket.userId]
-          });
-          await room.save();
-          
-          // Populate the creator info
-          room = await Room.findOne({ roomId })
-            .populate('createdBy', 'email username')
-            .populate('participants', 'email username');
-        } else {
-          // Add user to participants if not already there
-          const isParticipant = room.participants.some(p => p._id.toString() === socket.userId.toString());
-          const isCreator = room.createdBy._id.toString() === socket.userId.toString();
-          
-          if (!isParticipant && !isCreator) {
-            room.participants.push(socket.userId);
-            await room.save();
-            
-            // Re-fetch with populated data
-            room = await Room.findOne({ roomId })
-              .populate('createdBy', 'email username')
-              .populate('participants', 'email username');
-          }
-        }
+        // Refresh room data
+        room = await Room.findOne({ roomId: normalizedRoomId })
+          .populate('createdBy', 'email username')
+          .populate('participants', 'email username');
+      }
 
-        console.log(`✅ Room ready:`, room.name);
+      // **CRITICAL: Join socket room BEFORE updating tracking**
+      socket.join(normalizedRoomId);
+      
+      // Update tracking maps
+      this.userRoomMap.set(socket.id, normalizedRoomId);
+      if (!this.roomToSocketsMap.has(normalizedRoomId)) {
+        this.roomToSocketsMap.set(normalizedRoomId, new Set());
+      }
+      this.roomToSocketsMap.get(normalizedRoomId).add(socket.id);
 
-        // Join socket room
-        socket.join(roomId);
-        socket.currentRoom = roomId;
-
-        // Update room mappings
-        if (!this.roomToSocketsMap.has(roomId)) {
-          this.roomToSocketsMap.set(roomId, new Set());
-        }
-        this.roomToSocketsMap.get(roomId).add(socket.id);
-
-        // Notify other users in room
-        socket.to(roomId).emit("user:joined", {
-          email: socket.userEmail,
-          userId: socket.userId,
-          socketId: socket.id,
-          user: {
-            _id: socket.user._id,
-            email: socket.user.email,
-            username: socket.user.username
-          }
-        });
-
-        // Get current participants
-        const roomSockets = Array.from(this.roomToSocketsMap.get(roomId) || [])
-          .filter(id => id !== socket.id)
-          .map(id => ({
-            socketId: id,
-            user: this.socketIdToUserMap.get(id)
-          }))
-          .filter(participant => participant.user); // Filter out undefined users
-
-        // Send room joined confirmation
-        socket.emit("room:joined", {
-          roomId,
-          participants: roomSockets,
-          room: room
-        });
-
-        // Initialize or update room activity
-        await this.initializeRoomActivity(room._id, socket.userId);
-
-        console.log(`✅ User ${socket.userEmail} joined room ${roomId}`);
-      } catch (error) {
-        console.error("❌ Error joining room:", error);
-        socket.emit("room:error", { 
-          message: error.message || "Failed to join room" 
+      // Initialize room state if not exists
+      if (!this.roomStates.has(normalizedRoomId)) {
+        this.roomStates.set(normalizedRoomId, {
+          code: '',
+          language: 'cpp',
+          programInput: '',
+          lastCompilation: null
         });
       }
-    });
-  }
+
+      // Get current participants (excluding the joining user)
+      const roomSockets = this.getRoomParticipants(normalizedRoomId)
+        .filter(p => p.socketId !== socket.id && p.user);
+
+      // Get current room state
+      const roomState = this.roomStates.get(normalizedRoomId);
+
+      console.log(`✅ User ${socket.userEmail} successfully joined room ${normalizedRoomId}`);
+      console.log(`📊 Room ${normalizedRoomId} now has ${this.roomToSocketsMap.get(normalizedRoomId).size} socket participants`);
+
+      // **CRITICAL: Send room joined confirmation IMMEDIATELY**
+      socket.emit("room:joined", {
+        roomId: normalizedRoomId,
+        participants: roomSockets,
+        room: room,
+        roomState: roomState
+      });
+
+      // **CRITICAL: Notify other users AFTER successful join**
+      socket.to(normalizedRoomId).emit("user:joined", {
+        email: socket.userEmail,
+        userId: socket.userId,
+        socketId: socket.id,
+        user: {
+          _id: socket.user._id,
+          email: socket.user.email,
+          username: socket.user.username
+        }
+      });
+
+      // Initialize room activity
+      await this.initializeRoomActivity(room._id, socket.userId);
+      
+    } catch (error) {
+      console.error("❌ Error joining room:", error);
+      socket.emit("room:error", { 
+        message: error.message || "Failed to join room",
+        code: "JOIN_ERROR"
+      });
+    }
+  });
+}
 
   async initializeRoomActivity(roomObjectId, userId) {
     try {
@@ -185,7 +382,8 @@ class SocketServer {
         activity = new RoomActivity({
           room: roomObjectId,
           codeSnapshot: "",
-          language: "cpp"
+          language: "cpp",
+          programInput: ""
         });
         await activity.save();
         console.log(`📝 Created new activity for room ${roomObjectId}`);
@@ -199,14 +397,19 @@ class SocketServer {
 
   handleRoomLeave(socket) {
     socket.on("room:leave", (data) => {
-      const { roomId } = data;
-      this.leaveRoom(socket, roomId);
+      const { roomId: originalRoomId } = data;
+      const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+      if (normalizedRoomId) {
+        this.leaveRoom(socket, normalizedRoomId);
+      }
     });
   }
 
   handleUserCall(socket) {
     socket.on("user:call", ({ to, offer, roomId }) => {
-      console.log(`📞 Call initiated from ${socket.id} to ${to}`);
+      const normalizedRoomId = this.normalizeRoomId(roomId);
+      
+      console.log(`📞 Call initiated from ${socket.id} to ${to} in room ${normalizedRoomId}`);
       this.io.to(to).emit("incoming:call", {
         from: socket.id,
         offer,
@@ -215,7 +418,7 @@ class SocketServer {
           email: socket.user.email,
           username: socket.user.username
         },
-        roomId
+        roomId: normalizedRoomId
       });
     });
   }
@@ -263,12 +466,39 @@ class SocketServer {
     });
   }
 
+  handleWebRTCEvents(socket) {
+    socket.on("webrtc:offer", ({ to, offer }) => {
+      console.log(`📡 WebRTC offer from ${socket.id} to ${to}`);
+      this.io.to(to).emit("webrtc:offer", {
+        from: socket.id,
+        offer
+      });
+    });
+
+    socket.on("webrtc:answer", ({ to, answer }) => {
+      console.log(`📡 WebRTC answer from ${socket.id} to ${to}`);
+      this.io.to(to).emit("webrtc:answer", {
+        from: socket.id,
+        answer
+      });
+    });
+
+    socket.on("webrtc:ice-candidate", ({ to, candidate }) => {
+      console.log(`🧊 ICE candidate from ${socket.id} to ${to}`);
+      this.io.to(to).emit("webrtc:ice-candidate", {
+        from: socket.id,
+        candidate
+      });
+    });
+  }
+
   handleChatMessage(socket) {
-    socket.on("chat:message", async ({ roomId, message }) => {
+    socket.on("chat:message", async ({ roomId: originalRoomId, message }) => {
       try {
-        if (!message || message.trim() === "") {
-          return;
-        }
+        if (!message || message.trim() === "") return;
+
+        const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+        if (!normalizedRoomId) return;
 
         const messageData = {
           _id: Date.now().toString(),
@@ -282,12 +512,10 @@ class SocketServer {
           type: "text"
         };
 
-        // Broadcast to all users in the room
-        this.io.to(roomId).emit("chat:message", messageData);
+        this.io.to(normalizedRoomId).emit("chat:message", messageData);
 
-        // Save message to activity (optional, for persistence)
         try {
-          const room = await Room.findOne({ roomId });
+          const room = await this.findRoomByAnyId(normalizedRoomId);
           if (room) {
             let activity = await RoomActivity.findOne({ room: room._id });
             if (activity) {
@@ -301,22 +529,30 @@ class SocketServer {
             }
           }
         } catch (saveError) {
-          console.error("Error saving message to activity:", saveError);
+          console.error("Error saving message:", saveError);
         }
 
-        console.log(`💬 Message sent in room ${roomId} by ${socket.userEmail}`);
+        console.log(`💬 Message sent in room ${normalizedRoomId} by ${socket.userEmail}`);
       } catch (error) {
         console.error("Error handling chat message:", error);
-        socket.emit("room:error", { message: "Failed to send message" });
       }
     });
   }
 
   handleCodeUpdate(socket) {
-    socket.on("code:update", async ({ roomId, code, language }) => {
+    socket.on("code:update", async ({ roomId: originalRoomId, code, language }) => {
       try {
-        // Broadcast code changes to all users in the room except sender
-        socket.to(roomId).emit("code:update", {
+        const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+        if (!normalizedRoomId) return;
+
+        // Update room state
+        const roomState = this.roomStates.get(normalizedRoomId) || {};
+        roomState.code = code;
+        roomState.language = language;
+        this.roomStates.set(normalizedRoomId, roomState);
+
+        // Broadcast to other users in the room
+        socket.to(normalizedRoomId).emit("code:update", {
           code,
           language,
           updatedBy: {
@@ -326,9 +562,9 @@ class SocketServer {
           }
         });
 
-        // Update activity with latest code snapshot
+        // Save to database
         try {
-          const room = await Room.findOne({ roomId });
+          const room = await this.findRoomByAnyId(normalizedRoomId);
           if (room) {
             let activity = await RoomActivity.findOne({ room: room._id });
             if (activity) {
@@ -339,17 +575,20 @@ class SocketServer {
             }
           }
         } catch (saveError) {
-          console.error("Error saving code to activity:", saveError);
+          console.error("Error saving code:", saveError);
         }
 
-        console.log(`💻 Code updated in room ${roomId} by ${socket.userEmail}`);
+        console.log(`💻 Code updated in room ${normalizedRoomId} by ${socket.userEmail}`);
       } catch (error) {
         console.error("Error handling code update:", error);
       }
     });
 
-    socket.on("code:cursor", ({ roomId, position, selection }) => {
-      socket.to(roomId).emit("code:cursor", {
+    socket.on("code:cursor", ({ roomId: originalRoomId, position, selection }) => {
+      const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+      if (!normalizedRoomId) return;
+      
+      socket.to(normalizedRoomId).emit("code:cursor", {
         position,
         selection,
         user: {
@@ -361,10 +600,138 @@ class SocketServer {
     });
   }
 
+  // NEW: Handle shared input updates
+  handleInputUpdate(socket) {
+    socket.on("input:update", async ({ roomId: originalRoomId, input }) => {
+      try {
+        const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+        if (!normalizedRoomId) return;
+
+        // Update room state
+        const roomState = this.roomStates.get(normalizedRoomId) || {};
+        roomState.programInput = input;
+        this.roomStates.set(normalizedRoomId, roomState);
+
+        // Broadcast to other users in the room
+        socket.to(normalizedRoomId).emit("input:update", {
+          input,
+          updatedBy: {
+            _id: socket.user._id,
+            email: socket.user.email,
+            username: socket.user.username
+          }
+        });
+
+        // Save to database
+        try {
+          const room = await this.findRoomByAnyId(normalizedRoomId);
+          if (room) {
+            let activity = await RoomActivity.findOne({ room: room._id });
+            if (activity) {
+              activity.programInput = input;
+              activity.updatedAt = new Date();
+              await activity.save();
+            }
+          }
+        } catch (saveError) {
+          console.error("Error saving input:", saveError);
+        }
+
+        console.log(`📥 Input updated in room ${normalizedRoomId} by ${socket.userEmail}`);
+      } catch (error) {
+        console.error("Error handling input update:", error);
+      }
+    });
+  }
+
+  // NEW: Handle shared compilation
+  handleCompilation(socket) {
+    socket.on("compilation:start", ({ roomId: originalRoomId }) => {
+      const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+      if (!normalizedRoomId) return;
+
+      // Broadcast compilation start to all users in room
+      this.io.to(normalizedRoomId).emit("compilation:start", {
+        startedBy: {
+          _id: socket.user._id,
+          email: socket.user.email,
+          username: socket.user.username
+        }
+      });
+
+      console.log(`🚀 Compilation started in room ${normalizedRoomId} by ${socket.userEmail}`);
+    });
+
+    socket.on("compilation:result", async ({ roomId: originalRoomId, result, error }) => {
+      try {
+        const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+        if (!normalizedRoomId) return;
+
+        // Update room state with compilation result
+        const roomState = this.roomStates.get(normalizedRoomId) || {};
+        roomState.lastCompilation = {
+          result,
+          error,
+          timestamp: new Date(),
+          compiledBy: {
+            _id: socket.user._id,
+            email: socket.user.email,
+            username: socket.user.username
+          }
+        };
+        this.roomStates.set(normalizedRoomId, roomState);
+
+        // Broadcast compilation result to all users in room
+        this.io.to(normalizedRoomId).emit("compilation:result", {
+          result,
+          error,
+          compiledBy: {
+            _id: socket.user._id,
+            email: socket.user.email,
+            username: socket.user.username
+          }
+        });
+
+        // Save compilation result to database
+        try {
+          const room = await this.findRoomByAnyId(normalizedRoomId);
+          if (room) {
+            let activity = await RoomActivity.findOne({ room: room._id });
+            if (activity) {
+              if (!activity.compilationHistory) {
+                activity.compilationHistory = [];
+              }
+              activity.compilationHistory.push({
+                result,
+                error,
+                timestamp: new Date(),
+                compiledBy: socket.userId
+              });
+              // Keep only last 10 compilation results
+              if (activity.compilationHistory.length > 10) {
+                activity.compilationHistory = activity.compilationHistory.slice(-10);
+              }
+              await activity.save();
+            }
+          }
+        } catch (saveError) {
+          console.error("Error saving compilation result:", saveError);
+        }
+
+        console.log(`✅ Compilation result shared in room ${normalizedRoomId} by ${socket.userEmail}`);
+      } catch (error) {
+        console.error("Error handling compilation result:", error);
+      }
+    });
+  }
+
   handleRecordingEvents(socket) {
-    socket.on("recording:start", ({ roomId }) => {
-      console.log(`🎥 Recording started in room ${roomId} by ${socket.userEmail}`);
-      socket.to(roomId).emit("recording:started", {
+    socket.on("recording:start", ({ roomId: originalRoomId }) => {
+      const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+      if (!normalizedRoomId) return;
+      
+      console.log(`🎥 Recording started in room ${normalizedRoomId} by ${socket.userEmail}`);
+      socket.to(normalizedRoomId).emit("recording:started", {
         startedBy: {
           _id: socket.user._id,
           email: socket.user.email,
@@ -373,9 +740,12 @@ class SocketServer {
       });
     });
 
-    socket.on("recording:stop", ({ roomId, recordingUrl, duration }) => {
-      console.log(`⏹️ Recording stopped in room ${roomId} by ${socket.userEmail}`);
-      socket.to(roomId).emit("recording:stopped", {
+    socket.on("recording:stop", ({ roomId: originalRoomId, recordingUrl, duration }) => {
+      const normalizedRoomId = this.normalizeRoomId(originalRoomId);
+      if (!normalizedRoomId) return;
+      
+      console.log(`⏹️ Recording stopped in room ${normalizedRoomId} by ${socket.userEmail}`);
+      socket.to(normalizedRoomId).emit("recording:stopped", {
         stoppedBy: {
           _id: socket.user._id,
           email: socket.user.email,
@@ -391,52 +761,75 @@ class SocketServer {
     socket.on("disconnect", (reason) => {
       console.log(`❌ User ${socket.userEmail} disconnected: ${reason}`);
       
-      // Clean up mappings
+      const currentRoom = this.userRoomMap.get(socket.id);
+      
       this.emailToSocketIdMap.delete(socket.userEmail);
       this.socketIdToEmailMap.delete(socket.id);
       this.socketIdToUserMap.delete(socket.id);
+      this.userRoomMap.delete(socket.id);
 
-      // Leave room and notify others
-      if (socket.currentRoom) {
-        this.leaveRoom(socket, socket.currentRoom);
+      if (currentRoom) {
+        this.leaveRoom(socket, currentRoom);
       }
     });
   }
 
   leaveRoom(socket, roomId) {
     try {
-      if (roomId && this.roomToSocketsMap.has(roomId)) {
-        this.roomToSocketsMap.get(roomId).delete(socket.id);
+      const normalizedRoomId = this.normalizeRoomId(roomId);
+      if (!normalizedRoomId) return;
+      
+      if (this.roomToSocketsMap.has(normalizedRoomId)) {
+        this.roomToSocketsMap.get(normalizedRoomId).delete(socket.id);
         
-        // If room is empty, clean up
-        if (this.roomToSocketsMap.get(roomId).size === 0) {
-          this.roomToSocketsMap.delete(roomId);
-          console.log(`🧹 Cleaned up empty room: ${roomId}`);
+        if (this.roomToSocketsMap.get(normalizedRoomId).size === 0) {
+          this.roomToSocketsMap.delete(normalizedRoomId);
+          // Clean up room state when room is empty
+          this.roomStates.delete(normalizedRoomId);
+          console.log(`🧹 Cleaned up empty room: ${normalizedRoomId}`);
+        } else {
+          console.log(`📊 Room ${normalizedRoomId} now has ${this.roomToSocketsMap.get(normalizedRoomId).size} participants`);
         }
       }
 
-      socket.leave(roomId);
-      socket.to(roomId).emit("user:left", {
+      socket.leave(normalizedRoomId);
+      this.userRoomMap.delete(socket.id);
+      
+      socket.to(normalizedRoomId).emit("user:left", {
         email: socket.userEmail,
         userId: socket.userId,
         socketId: socket.id
       });
 
-      socket.currentRoom = null;
-      console.log(`👋 User ${socket.userEmail} left room ${roomId}`);
+      console.log(`👋 User ${socket.userEmail} left room ${normalizedRoomId}`);
     } catch (error) {
       console.error("Error leaving room:", error);
     }
   }
 
-  // Utility method to get room participants
   getRoomParticipants(roomId) {
-    const socketIds = this.roomToSocketsMap.get(roomId) || new Set();
-    return Array.from(socketIds).map(socketId => ({
-      socketId,
-      user: this.socketIdToUserMap.get(socketId)
-    }));
+    const normalizedRoomId = this.normalizeRoomId(roomId);
+    if (!normalizedRoomId) return [];
+    
+    const socketIds = this.roomToSocketsMap.get(normalizedRoomId) || new Set();
+    const participants = [];
+    
+    for (const socketId of socketIds) {
+      const email = this.socketIdToEmailMap.get(socketId);
+      const user = this.socketIdToUserMap.get(socketId);
+      
+      if (user && email) {
+        participants.push({
+          socketId,
+          email,
+          user
+        });
+      }
+    }
+    
+    return participants;
   }
 }
 
 export default new SocketServer();
+

@@ -18,6 +18,11 @@ const roomReducer = (state, action) => {
       };
     
     case "ADD_PARTICIPANT":
+      // Avoid duplicate participants
+      const existingParticipant = state.participants.find(p => p.socketId === action.payload.socketId);
+      if (existingParticipant) {
+        return state;
+      }
       return {
         ...state,
         participants: [...state.participants, action.payload],
@@ -32,7 +37,7 @@ const roomReducer = (state, action) => {
     case "SET_PARTICIPANTS":
       return {
         ...state,
-        participants: action.payload,
+        participants: action.payload || [],
       };
     
     case "ADD_CHAT_MESSAGE":
@@ -64,7 +69,7 @@ const roomReducer = (state, action) => {
       return {
         ...state,
         error: action.payload,
-        isInRoom: false,
+        isInRoom: action.payload?.type !== "ROOM_FULL" ? false : state.isInRoom,
       };
     
     case "CLEAR_ERROR":
@@ -111,14 +116,35 @@ export const RoomProvider = ({ children }) => {
   const { user } = useAuth();
   const [state, dispatch] = useReducer(roomReducer, initialState);
 
-  // Debug logs
-  useEffect(() => {
-    console.log('RoomProvider - Socket:', socket?.id);
-    console.log('RoomProvider - IsConnected:', isConnected);
-    console.log('RoomProvider - User:', user);
-    console.log('RoomProvider - State:', state);
-  }, [socket, isConnected, user, state]);
-  
+  // Room ID validation and normalization
+  const normalizeRoomId = useCallback((roomId) => {
+    if (!roomId) return null;
+    
+    const cleanId = roomId.toString().replace(/^room-/, '');
+    return `room-${cleanId}`;
+  }, []);
+
+  // Create room URL helper
+  const createRoomUrl = useCallback((baseRoomId) => {
+    const cleanId = baseRoomId.toString().replace(/^room-/, '');
+    return `/room/${cleanId}`;
+  }, []);
+
+  // Debug logging
+  const debugRoomId = useCallback((location, roomId) => {
+    console.log(`🔍 Room ID Debug [${location}]:`, {
+      original: roomId,
+      hasPrefix: typeof roomId === 'string' ? roomId.startsWith('room-') : false,
+      length: roomId?.length,
+      type: typeof roomId
+    });
+  }, []);
+
+  // Clear error function
+  const clearError = useCallback(() => {
+    dispatch({ type: "CLEAR_ERROR" });
+  }, []);
+
   // Handle connection errors
   useEffect(() => {
     if (connectionError) {
@@ -129,7 +155,7 @@ export const RoomProvider = ({ children }) => {
     }
   }, [connectionError]);
 
-  // Socket event handlers
+  // Socket event handlers - Enhanced for WebRTC integration
   useEffect(() => {
     if (!socket || !isConnected) {
       console.log('Socket not ready for room events');
@@ -138,41 +164,126 @@ export const RoomProvider = ({ children }) => {
 
     console.log('Setting up room socket events');
 
-    // Room events
-    const handleRoomJoined = (data) => {
-      console.log("Room joined event received:", data);
-      dispatch({
-        type: "SET_ROOM_INFO",
-        payload: { roomId: data.roomId, room: data.room }
+    // Room events - Enhanced to provide proper data structure for WebRTC
+    // In RoomContext.jsx - Enhanced room joined handler
+const handleRoomJoined = (data) => {
+  console.log("✅ Room joined event received:", data);
+  debugRoomId('ROOM_JOINED_EVENT', data.roomId);
+  
+  // Ensure participants have proper structure for WebRTC
+  const participants = (data.participants || []).map(participant => ({
+    ...participant,
+    socketId: participant.socketId || participant.id,
+    user: participant.user || participant,
+    email: participant.user?.email || participant.email,
+    username: participant.user?.username || participant.username
+  }));
+
+  // **CRITICAL: Update state immediately**
+  dispatch({
+    type: "SET_ROOM_INFO",
+    payload: { roomId: data.roomId, room: data.room }
+  });
+  dispatch({
+    type: "SET_PARTICIPANTS",
+    payload: participants
+  });
+
+  // **CRITICAL: Clear any loading states**
+  dispatch({ type: "SET_LOADING", payload: false });
+  dispatch({ type: "CLEAR_ERROR" });
+
+  console.log(`✅ Room state updated - isInRoom should now be true`);
+
+  // Emit for WebRTC context with delay to ensure state is updated
+  setTimeout(() => {
+    if (socket) {
+      console.log('🎥 Emitting room:joined for WebRTC with data:', {
+        roomId: data.roomId,
+        participants: participants
       });
-      dispatch({
-        type: "SET_PARTICIPANTS",
-        payload: data.participants || []
+      socket.emit('webrtc:room-joined', {
+        roomId: data.roomId,
+        participants: participants
       });
-    };
+    }
+  }, 100);
+};
 
     const handleUserJoined = (data) => {
       console.log("User joined event received:", data);
+      
+      // Ensure proper data structure for WebRTC
+      const participantData = {
+        socketId: data.socketId || data.id,
+        user: data.user || data,
+        email: data.user?.email || data.email,
+        username: data.user?.username || data.username,
+        ...data
+      };
+
       dispatch({
         type: "ADD_PARTICIPANT",
-        payload: data
+        payload: participantData
       });
+
+      // The WebRTC context is already listening for 'user:joined'
+      // So this event will be automatically handled by WebRTC
     };
 
     const handleUserLeft = (data) => {
       console.log("User left event received:", data);
+      
+      const participantData = {
+        socketId: data.socketId || data.id,
+        ...data
+      };
+
       dispatch({
         type: "REMOVE_PARTICIPANT",
-        payload: data
+        payload: participantData
       });
+
+      // The WebRTC context is already listening for 'user:left'
+      // So this event will be automatically handled by WebRTC
     };
 
+    const handleRoomLeft = () => {
+      console.log("Room left event received");
+      dispatch({ type: "LEAVE_ROOM" });
+      
+      // Emit room:left event for WebRTC context
+      if (socket) {
+        console.log('🚪 Emitting room:left for WebRTC');
+        socket.emit('webrtc:room-left');
+      }
+    };
+
+    // Enhanced room error handler with special ROOM_FULL handling
     const handleRoomError = (error) => {
       console.error("Room error event received:", error);
-      dispatch({
-        type: "SET_ERROR",
-        payload: error.message || error
-      });
+      
+      // Special handling for room full error
+      if (error.code === "ROOM_FULL") {
+        dispatch({
+          type: "SET_ERROR",
+          payload: {
+            message: error.message,
+            type: "ROOM_FULL",
+            code: error.code
+          }
+        });
+      } else {
+        dispatch({
+          type: "SET_ERROR",
+          payload: error.message || error
+        });
+      }
+
+      // Also emit for WebRTC context
+      if (socket) {
+        socket.emit('webrtc:room-error', error);
+      }
     };
 
     const handleChatMessage = (message) => {
@@ -209,6 +320,7 @@ export const RoomProvider = ({ children }) => {
 
     // Attach event listeners
     socket.on("room:joined", handleRoomJoined);
+    socket.on("room:left", handleRoomLeft);
     socket.on("user:joined", handleUserJoined);
     socket.on("user:left", handleUserLeft);
     socket.on("room:error", handleRoomError);
@@ -221,6 +333,7 @@ export const RoomProvider = ({ children }) => {
     return () => {
       console.log('Cleaning up room socket events');
       socket.off("room:joined", handleRoomJoined);
+      socket.off("room:left", handleRoomLeft);
       socket.off("user:joined", handleUserJoined);
       socket.off("user:left", handleUserLeft);
       socket.off("room:error", handleRoomError);
@@ -229,70 +342,12 @@ export const RoomProvider = ({ children }) => {
       socket.off("recording:started", handleRecordingStarted);
       socket.off("recording:stopped", handleRecordingStopped);
     };
-  }, [socket, isConnected]);
+  }, [socket, isConnected, debugRoomId]);
 
-  // Create or get room
-  const createRoom = useCallback(async (roomData = {}) => {
-    dispatch({ type: "SET_LOADING", payload: true });
-    
-    try {
-      const response = await fetch('/api/v1/room/create', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('accessToken')}`
-        },
-        body: JSON.stringify(roomData)
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to create room');
-      }
-
-      const result = await response.json();
-      dispatch({ type: "SET_LOADING", payload: false });
-      return result.data;
-    } catch (error) {
-      console.error('Error creating room:', error);
-      dispatch({
-        type: "SET_ERROR",
-        payload: error.message || 'Failed to create room'
-      });
-      dispatch({ type: "SET_LOADING", payload: false });
-      throw error;
-    }
-  }, []);
-
-  // Get room info
-  const getRoomInfo = useCallback(async (roomId) => {
-    try {
-      const response = await fetch(`/api/v1/room/${roomId}`, {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('accessToken')}`
-        }
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Room not found');
-      }
-
-      const result = await response.json();
-      return result.data;
-    } catch (error) {
-      console.error('Error getting room info:', error);
-      throw error;
-    }
-  }, []);
-
-  // Join room
-  const joinRoom = useCallback((roomId) => {
-    console.log('JoinRoom called with:', roomId);
-    console.log('Socket:', socket?.id, 'Connected:', isConnected, 'User:', user);
-
+  // Room actions
+  const joinRoom = useCallback(async (roomId) => {
     if (!socket || !isConnected) {
-      console.error('Cannot join room - socket not connected');
+      console.error("Socket not connected");
       dispatch({
         type: "SET_ERROR",
         payload: "Socket not connected"
@@ -300,129 +355,155 @@ export const RoomProvider = ({ children }) => {
       return;
     }
 
-    if (!user) {
-      console.error('Cannot join room - user not authenticated');
+    if (!roomId) {
+      console.error("Room ID is required");
       dispatch({
         type: "SET_ERROR",
-        payload: "User not authenticated"
+        payload: "Room ID is required"
       });
       return;
     }
 
-    console.log('Emitting room:join event');
-    socket.emit("room:join", { roomId });
-  }, [socket, isConnected, user]);
-
-  // Leave room
-  const leaveRoom = useCallback(() => {
-    console.log('LeaveRoom called');
-    if (!socket || !state.roomId) {
-      console.log('Cannot leave room - no socket or roomId');
-      return;
-    }
-
-    console.log('Emitting room:leave event for room:', state.roomId);
-    socket.emit("room:leave", { roomId: state.roomId });
-    dispatch({ type: "LEAVE_ROOM" });
-  }, [socket, state.roomId]);
-
-  // Send chat message
-  const sendChatMessage = useCallback((message) => {
-    if (!socket || !state.roomId || !message.trim()) return;
-
-    console.log('Sending chat message:', message);
-    socket.emit("chat:message", {
-      roomId: state.roomId,
-      message: message.trim()
-    });
-  }, [socket, state.roomId]);
-
-  // Update code
-  const updateCode = useCallback((code, language = "cpp") => {
-    if (!socket || !state.roomId) return;
-
-    console.log('Updating code');
-    // Update local state immediately for better UX
-    dispatch({
-      type: "UPDATE_CODE",
-      payload: { code, language }
-    });
-
-    // Emit to other participants
-    socket.emit("code:update", {
-      roomId: state.roomId,
-      code,
-      language
-    });
-  }, [socket, state.roomId]);
-
-  // Start recording
-  const startRecording = useCallback(() => {
-    if (!socket || !state.roomId) return;
-
-    console.log('Starting recording');
-    socket.emit("recording:start", { roomId: state.roomId });
-    dispatch({
-      type: "SET_RECORDING_STATUS",
-      payload: { isRecording: true }
-    });
-  }, [socket, state.roomId]);
-
-  // Stop recording
-  const stopRecording = useCallback((recordingUrl) => {
-    if (!socket || !state.roomId) return;
-
-    console.log('Stopping recording');
-    socket.emit("recording:stop", { 
-      roomId: state.roomId, 
-      recordingUrl 
-    });
-    dispatch({
-      type: "SET_RECORDING_STATUS",
-      payload: { isRecording: false, recordingUrl }
-    });
-  }, [socket, state.roomId]);
-
-  // Get user's rooms
-  const getUserRooms = useCallback(async () => {
     try {
-      const response = await fetch('/api/v1/room/my-rooms', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('accessToken')}`
-        }
+      dispatch({ type: "SET_LOADING", payload: true });
+      dispatch({ type: "CLEAR_ERROR" });
+
+      const normalizedRoomId = normalizeRoomId(roomId);
+      debugRoomId('JOIN_ROOM_ATTEMPT', normalizedRoomId);
+
+      console.log(`🚀 Attempting to join room: ${normalizedRoomId}`);
+      
+      // Include user information for WebRTC
+      const joinData = {
+        roomId: normalizedRoomId,
+        user: user
+      };
+      
+      socket.emit("room:join", joinData);
+      
+    } catch (error) {
+      console.error("Error joining room:", error);
+      dispatch({
+        type: "SET_ERROR",
+        payload: error.message || "Failed to join room"
+      });
+    } finally {
+      dispatch({ type: "SET_LOADING", payload: false });
+    }
+  }, [socket, isConnected, normalizeRoomId, debugRoomId, user]);
+
+  const leaveRoom = useCallback(() => {
+    if (!socket || !state.roomId) {
+      console.log("No room to leave or socket not connected");
+      return;
+    }
+
+    try {
+      console.log(`👋 Leaving room: ${state.roomId}`);
+      socket.emit("room:leave", { roomId: state.roomId });
+      dispatch({ type: "LEAVE_ROOM" });
+    } catch (error) {
+      console.error("Error leaving room:", error);
+    }
+  }, [socket, state.roomId]);
+
+  const sendChatMessage = useCallback((message) => {
+    if (!socket || !state.roomId || !message.trim()) {
+      console.log("Cannot send message: socket, room, or message missing");
+      return;
+    }
+
+    try {
+      debugRoomId('SEND_CHAT_MESSAGE', state.roomId);
+      console.log(`💬 Sending message to room: ${state.roomId}`);
+      
+      socket.emit("chat:message", {
+        roomId: state.roomId,
+        message: message.trim(),
+        user: user
+      });
+    } catch (error) {
+      console.error("Error sending chat message:", error);
+    }
+  }, [socket, state.roomId, debugRoomId, user]);
+  
+
+  const updateCode = useCallback((code, language) => {
+    if (!socket || !state.roomId) {
+      console.log("Cannot update code: socket or room missing");
+      return;
+    }
+
+    try {
+      debugRoomId('UPDATE_CODE', state.roomId);
+      console.log(`💻 Updating code in room: ${state.roomId}`);
+      
+      socket.emit("code:update", {
+        roomId: state.roomId,
+        code,
+        language,
+        user: user
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to fetch rooms');
-      }
-
-      const result = await response.json();
-      return result.data;
+      // Update local state immediately for responsiveness
+      dispatch({
+        type: "UPDATE_CODE",
+        payload: { code, language }
+      });
     } catch (error) {
-      console.error('Error fetching user rooms:', error);
-      throw error;
+      console.error("Error updating code:", error);
     }
-  }, []);
+  }, [socket, state.roomId, debugRoomId, user]);
 
-  // Clear error
-  const clearError = useCallback(() => {
-    console.log('Clearing room error');
-    dispatch({ type: "CLEAR_ERROR" });
-  }, []);
+  const updateCursor = useCallback((position, selection) => {
+    if (!socket || !state.roomId) {
+      return;
+    }
+
+    try {
+      socket.emit("code:cursor", {
+        roomId: state.roomId,
+        position,
+        selection,
+        user: user
+      });
+    } catch (error) {
+      console.error("Error updating cursor:", error);
+    }
+  }, [socket, state.roomId, user]);
+
+  // Helper function to get participant by socket ID (useful for WebRTC integration)
+  const getParticipantBySocketId = useCallback((socketId) => {
+    return state.participants.find(p => p.socketId === socketId);
+  }, [state.participants]);
+
+  // Helper function to get current user's participant data
+  const getCurrentUserParticipant = useCallback(() => {
+    return state.participants.find(p => p.socketId === socket?.id);
+  }, [state.participants, socket?.id]);
 
   const contextValue = {
+    // State
     ...state,
-    createRoom,
-    getRoomInfo,
+    
+    // Computed values
+    isConnected,
+    connectionError,
+    
+    // Actions
     joinRoom,
     leaveRoom,
     sendChatMessage,
     updateCode,
-    startRecording,
-    stopRecording,
-    getUserRooms,
-    clearError,
+    updateCursor,
+    clearError, // Add the clearError function to context
+    
+    // Utility functions
+    normalizeRoomId,
+    createRoomUrl,
+    debugRoomId,
+    getParticipantBySocketId,
+    getCurrentUserParticipant,
   };
 
   return (

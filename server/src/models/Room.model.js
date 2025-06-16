@@ -1,4 +1,3 @@
-// backend/models/Room.model.js - Enhanced version
 import mongoose, { Schema } from "mongoose";
 
 const roomSchema = new Schema(
@@ -37,14 +36,14 @@ const roomSchema = new Schema(
     },
     maxParticipants: {
       type: Number,
-      default: 10,
+      default: 2, // Changed from 10 to 2
     },
     isPrivate: {
       type: Boolean,
       default: false,
     },
     password: {
-      type: String, // Optional room password
+      type: String,
     },
     settings: {
       allowScreenShare: {

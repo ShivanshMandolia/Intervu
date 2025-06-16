@@ -1,9 +1,9 @@
-// src/App.jsx
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/auth/AuthContext';
 import { SocketProvider } from './context/SocketContext';
 import { RoomProvider } from './context/RoomContext';
 import { WebRTCProvider } from './context/WebRTCContext';
+import { CodeEditorProvider } from './context/CodeEditorContext'; // Add this import
 import ProtectedRoute from './components/auth/ProtectedRoute';
 import Login from './components/auth/Login';
 import Register from './components/auth/Register';
@@ -19,14 +19,19 @@ function App() {
             {/* Public routes */}
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
-            
+
+
+          
             {/* Protected routes */}
             <Route 
               path="/dashboard" 
               element={
                 <ProtectedRoute>
                   <SocketProvider>
-                    <Dashboard />
+                                <RoomProvider>
+  <Dashboard />
+                                </RoomProvider>
+                  
                   </SocketProvider>
                 </ProtectedRoute>
               } 
@@ -39,7 +44,9 @@ function App() {
                   <SocketProvider>
                     <RoomProvider>
                       <WebRTCProvider>
-                        <Room />
+                        <CodeEditorProvider>
+                          <Room />
+                        </CodeEditorProvider>
                       </WebRTCProvider>
                     </RoomProvider>
                   </SocketProvider>
