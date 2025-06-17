@@ -57,6 +57,7 @@ class PeerService {
     return this.peer;
   }
 
+  // FIXED: Enhanced addLocalStream method
   addLocalStream(stream) {
     if (!this.peer || !stream) {
       console.warn('⚠️ Cannot add stream: peer or stream missing');
@@ -66,26 +67,34 @@ class PeerService {
     console.log('📡 Adding local stream tracks to peer connection');
 
     try {
-      // Remove existing tracks first
-      this.peer.getSenders().forEach(sender => {
-        if (sender.track) {
-          this.peer.removeTrack(sender);
-        }
-      });
-
-      // Add new tracks
+      // Get existing senders
+      const existingSenders = this.peer.getSenders();
+      
       stream.getTracks().forEach((track) => {
         try {
-          console.log('🎵 Adding track:', track.kind, track.id);
-          this.peer.addTrack(track, stream);
-          console.log('✅ Track added successfully');
+          console.log('🎵 Adding track:', track.kind, track.id, 'enabled:', track.enabled);
+          
+          // Check if we already have a sender for this track type
+          const existingSender = existingSenders.find(sender => 
+            sender.track && sender.track.kind === track.kind
+          );
+          
+          if (existingSender) {
+            // Replace the track instead of removing and adding
+            existingSender.replaceTrack(track);
+            console.log('✅ Track replaced successfully:', track.kind);
+          } else {
+            // Add new track
+            this.peer.addTrack(track, stream);
+            console.log('✅ Track added successfully:', track.kind);
+          }
         } catch (error) {
-          console.error('❌ Failed to add track:', track.kind, error);
+          console.error('❌ Failed to add/replace track:', track.kind, error);
         }
       });
 
       this.localStream = stream;
-      console.log(`✅ Successfully added ${stream.getTracks().length} tracks`);
+      console.log(`✅ Successfully processed ${stream.getTracks().length} tracks`);
       return true;
     } catch (error) {
       console.error('❌ Error adding local stream:', error);
@@ -327,7 +336,7 @@ export const WebRTCProvider = ({ children }) => {
     }
   }, [debugLog]);
 
-  // **FIXED: Enhanced getUserMedia with better device handling**
+  // **FIXED: Enhanced getUserMedia with audio-prioritized fallback**
   const getUserMedia = useCallback(async (constraints = { video: true, audio: true }) => {
     if (mediaInitializationRef.current) {
       debugLog('Media initialization already in progress');
@@ -348,22 +357,44 @@ export const WebRTCProvider = ({ children }) => {
         throw new Error('No camera or microphone devices found');
       }
 
-      // **FIXED: Progressive fallback strategy**
+      // **FIXED: Audio-prioritized fallback strategies**
       let stream = null;
       const fallbackStrategies = [
         // Strategy 1: Original constraints
         constraints,
-        // Strategy 2: Basic constraints
+        // Strategy 2: Prioritize audio with basic video
         { 
-          video: hasVideo ? { width: 640, height: 480 } : false, 
-          audio: hasAudio 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          },
+          video: hasVideo ? { width: 640, height: 480 } : false
         },
-        // Strategy 3: Audio only
+        // Strategy 3: Audio-first approach
         { 
-          video: false, 
-          audio: hasAudio 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true
+          }, 
+          video: hasVideo ? { width: 320, height: 240 } : false
         },
-        // Strategy 4: Video only (if audio fails)
+        // Strategy 4: Audio only (high quality)
+        { 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 44100
+          },
+          video: false 
+        },
+        // Strategy 5: Basic audio only
+        { 
+          audio: hasAudio,
+          video: false 
+        },
+        // Strategy 6: Video only (if audio fails)
         { 
           video: hasVideo ? { width: 320, height: 240 } : false, 
           audio: false 
@@ -468,24 +499,60 @@ export const WebRTCProvider = ({ children }) => {
     }
   }, [debugLog, checkAvailableDevices, state.localStream]);
 
-  // **FIXED: Enhanced peer connection setup with better error handling**
+  // **FIXED: Enhanced peer connection setup with improved ontrack handler**
   const setupPeerConnection = useCallback((peer, targetSocketId) => {
     debugLog('Setting up peer connection handlers for:', targetSocketId);
 
-    // Handle remote stream
+    // FIXED: Enhanced ontrack handler for better audio handling
     peer.ontrack = (event) => {
       debugLog('Received remote track:', { 
         kind: event.track.kind, 
         streams: event.streams.length,
         trackId: event.track.id,
-        trackLabel: event.track.label
+        trackLabel: event.track.label,
+        trackEnabled: event.track.enabled,
+        trackMuted: event.track.muted
       });
       
       if (event.streams && event.streams.length > 0) {
         const remoteStream = event.streams[0];
+        
+        // Log all tracks in the stream
+        const tracks = remoteStream.getTracks();
         debugLog('Remote stream received with tracks:', 
-          remoteStream.getTracks().map((t) => ({ kind: t.kind, id: t.id, label: t.label }))
+          tracks.map((t) => ({ 
+            kind: t.kind, 
+            id: t.id, 
+            label: t.label,
+            enabled: t.enabled,
+            muted: t.muted
+          }))
         );
+        
+        // Ensure we have both audio and video tracks if expected
+        const audioTracks = tracks.filter(t => t.kind === 'audio');
+        const videoTracks = tracks.filter(t => t.kind === 'video');
+        
+        debugLog('Track breakdown:', {
+          audio: audioTracks.length,
+          video: videoTracks.length
+        });
+        
+        // Add track event listeners for debugging
+        tracks.forEach(track => {
+          track.addEventListener('ended', () => {
+            debugLog(`Remote track ended: ${track.kind}`);
+          });
+          
+          track.addEventListener('mute', () => {
+            debugLog(`Remote track muted: ${track.kind}`);
+          });
+          
+          track.addEventListener('unmute', () => {
+            debugLog(`Remote track unmuted: ${track.kind}`);
+          });
+        });
+        
         dispatch({ type: 'SET_REMOTE_STREAM', payload: remoteStream });
         dispatch({ type: 'SET_CONNECTION_STATUS', payload: 'connected' });
         peerServiceRef.current.resetConnectionAttempts();
@@ -762,8 +829,7 @@ export const WebRTCProvider = ({ children }) => {
     dispatch({ type: 'CLEAR_ERROR' });
     return enabled;
   }, [state.localStream, debugLog]);
-
-  // Toggle audio
+// Toggle audio
   const toggleAudio = useCallback(() => {
     if (!state.localStream) {
       dispatch({ type: 'SET_ERROR', payload: 'No local stream available' });
@@ -796,6 +862,56 @@ export const WebRTCProvider = ({ children }) => {
     dispatch({ type: 'SET_DEVICE_ERROR', payload: null });
   }, []);
 
+  // **ADDED: Audio debugging function**
+  const debugAudioTracks = useCallback(() => {
+    console.log('🔊 === AUDIO DEBUG INFO ===');
+    
+    if (state.localStream) {
+      const localAudioTracks = state.localStream.getAudioTracks();
+      console.log('Local audio tracks:', localAudioTracks.map(t => ({
+        id: t.id,
+        label: t.label,
+        enabled: t.enabled,
+        muted: t.muted,
+        readyState: t.readyState
+      })));
+    }
+    
+    if (state.remoteStream) {
+      const remoteAudioTracks = state.remoteStream.getAudioTracks();
+      console.log('Remote audio tracks:', remoteAudioTracks.map(t => ({
+        id: t.id,
+        label: t.label,
+        enabled: t.enabled,
+        muted: t.muted,
+        readyState: t.readyState
+      })));
+    }
+    
+    if (peerServiceRef.current.peer) {
+      const senders = peerServiceRef.current.peer.getSenders();
+      const receivers = peerServiceRef.current.peer.getReceivers();
+      
+      console.log('Senders:', senders.map(s => ({
+        track: s.track ? {
+          kind: s.track.kind,
+          enabled: s.track.enabled,
+          muted: s.track.muted
+        } : null
+      })));
+      
+      console.log('Receivers:', receivers.map(r => ({
+        track: r.track ? {
+          kind: r.track.kind,
+          enabled: r.track.enabled,
+          muted: r.track.muted
+        } : null
+      })));
+    }
+    
+    console.log('🔊 === END AUDIO DEBUG ===');
+  }, [state.localStream, state.remoteStream]);
+
   // **FIXED: Initialize media on mount with better timing**
   useEffect(() => {
     if (!state.localStream && !state.deviceError && !mediaInitializationRef.current) {
@@ -809,7 +925,8 @@ export const WebRTCProvider = ({ children }) => {
       return () => clearTimeout(timer);
     }
   }, [getUserMedia, state.localStream, state.deviceError]);
-   useEffect(() => {
+
+  useEffect(() => {
     if (!socket || !isConnected || isInitializedRef.current) return;
     
     console.log('🎧 Setting up WebRTC socket listeners');
@@ -885,6 +1002,7 @@ export const WebRTCProvider = ({ children }) => {
       retryConnection,
       clearError,
       checkAvailableDevices,
+      debugAudioTracks, // **ADDED: Audio debugging function**
     }),
     [
       state.localStream,
@@ -903,6 +1021,7 @@ export const WebRTCProvider = ({ children }) => {
       retryConnection,
       clearError,
       checkAvailableDevices,
+      debugAudioTracks, // **ADDED: Audio debugging function**
     ]
   );
 
