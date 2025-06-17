@@ -20,7 +20,7 @@ import {
 } from '@heroicons/react/24/outline';
 
 // Enhanced VideoCall component with better layout
-// Enhanced VideoCall component with better stream handling
+// Enhanced VideoCall component with better audio handling
 const VideoCall = ({ localStream, remoteStream, callStatus }) => {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
@@ -36,7 +36,7 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
     };
   }, []);
 
-  // **FIXED: Enhanced playback handling with better error handling**
+  // **FIXED: Enhanced playback handling with better audio support**
   const handlePlay = useCallback(async (element, isRemote = false) => {
     if (!element || !isMountedRef.current) return;
     
@@ -157,7 +157,7 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
     }
   }, [localStream, handlePlay]);
 
-  // **FIXED: Enhanced remote video stream handling**
+  // **FIXED: Enhanced remote video stream handling with proper audio**
   useEffect(() => {
     const videoElement = remoteVideoRef.current;
     if (!videoElement || !remoteStream || !isMountedRef.current) return;
@@ -175,18 +175,60 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
     if (videoElement.srcObject !== remoteStream) {
       videoElement.srcObject = remoteStream;
       
-      // **FIXED: Ensure remote video audio is enabled**
+      // **FIXED: Critical - Ensure remote video audio is enabled**
       videoElement.muted = false;
       videoElement.volume = 1.0;
       
-      // **FIXED: Add additional event listeners for debugging**
-      const handleLoadStart = () => console.log('Remote video: loadstart');
-      const handleLoadedMetadata = () => console.log('Remote video: loadedmetadata');
-      const handleLoadedData = () => console.log('Remote video: loadeddata');
-      const handleCanPlay = () => console.log('Remote video: canplay');
-      const handlePlay = () => console.log('Remote video: play event');
-      const handlePlaying = () => console.log('Remote video: playing');
-      const handleError = (e) => console.error('Remote video error:', e);
+      // **FIXED: Set additional audio properties**
+      videoElement.autoplay = true;
+      videoElement.playsInline = true;
+      
+      // **FIXED: Add comprehensive event listeners for debugging**
+      const handleLoadStart = () => console.log('🎥 Remote video: loadstart');
+      const handleLoadedMetadata = () => {
+        console.log('🎥 Remote video: loadedmetadata');
+        console.log('🔊 Remote video audio properties:', {
+          muted: videoElement.muted,
+          volume: videoElement.volume,
+          hasAudio: remoteStream.getAudioTracks().length > 0
+        });
+      };
+      const handleLoadedData = () => {
+        console.log('🎥 Remote video: loadeddata');
+        // Double-check audio settings
+        videoElement.muted = false;
+        videoElement.volume = 1.0;
+      };
+      const handleCanPlay = () => {
+        console.log('🎥 Remote video: canplay');
+        // Ensure audio is still enabled
+        videoElement.muted = false;
+        videoElement.volume = 1.0;
+      };
+      const handlePlay = () => {
+        console.log('🎥 Remote video: play event');
+        console.log('🔊 Audio status during play:', {
+          muted: videoElement.muted,
+          volume: videoElement.volume,
+          audioTracks: remoteStream.getAudioTracks().length
+        });
+      };
+      const handlePlaying = () => {
+        console.log('🎥 Remote video: playing');
+        // Final audio check
+        if (videoElement.muted) {
+          console.warn('⚠️ Remote video was muted during playing - fixing');
+          videoElement.muted = false;
+          videoElement.volume = 1.0;
+        }
+      };
+      const handleError = (e) => console.error('❌ Remote video error:', e);
+      const handleVolumeChange = () => {
+        console.log('🔊 Remote video volume changed:', {
+          muted: videoElement.muted,
+          volume: videoElement.volume
+        });
+      };
       
       videoElement.addEventListener('loadstart', handleLoadStart);
       videoElement.addEventListener('loadedmetadata', handleLoadedMetadata);
@@ -195,9 +237,13 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
       videoElement.addEventListener('play', handlePlay);
       videoElement.addEventListener('playing', handlePlaying);
       videoElement.addEventListener('error', handleError);
+      videoElement.addEventListener('volumechange', handleVolumeChange);
       
       const timer = setTimeout(() => {
         if (isMountedRef.current && videoElement.isConnected) {
+          // Force audio settings before play
+          videoElement.muted = false;
+          videoElement.volume = 1.0;
           handlePlay(videoElement, true);
         }
       }, 100);
@@ -211,6 +257,7 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
         videoElement.removeEventListener('play', handlePlay);
         videoElement.removeEventListener('playing', handlePlaying);
         videoElement.removeEventListener('error', handleError);
+        videoElement.removeEventListener('volumechange', handleVolumeChange);
       };
     }
   }, [remoteStream, handlePlay]);
@@ -237,8 +284,34 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
         console.warn('⚠️ No audio tracks in remote stream!');
       } else {
         console.log('✅ Remote audio tracks found:', audioTracks.length);
+        audioTracks.forEach((track, index) => {
+          console.log(`🎵 Audio track ${index}:`, {
+            enabled: track.enabled,
+            muted: track.muted,
+            readyState: track.readyState,
+            label: track.label
+          });
+        });
       }
     }
+  }, [remoteStream]);
+
+  // **FIXED: Periodic audio check for remote video**
+  useEffect(() => {
+    if (!remoteStream || !remoteVideoRef.current) return;
+    
+    const interval = setInterval(() => {
+      const videoElement = remoteVideoRef.current;
+      if (videoElement && videoElement.srcObject === remoteStream) {
+        if (videoElement.muted) {
+          console.warn('⚠️ Remote video became muted - fixing');
+          videoElement.muted = false;
+          videoElement.volume = 1.0;
+        }
+      }
+    }, 1000);
+    
+    return () => clearInterval(interval);
   }, [remoteStream]);
 
   // Reset play buttons when streams change
@@ -264,22 +337,46 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
               ref={remoteVideoRef}
               autoPlay
               playsInline
-              muted={false} // **FIXED: Ensure remote audio is not muted**
+              muted={false} // **FIXED: Critical - Remote video must NOT be muted**
               className="w-full h-full object-contain"
               onLoadedData={() => {
-                console.log('Remote video loadedData event fired');
+                console.log('🎥 Remote video loadedData event fired');
+                const videoElement = remoteVideoRef.current;
+                if (videoElement) {
+                  // **FIXED: Force audio settings on load**
+                  videoElement.muted = false;
+                  videoElement.volume = 1.0;
+                  console.log('🔊 Audio settings applied:', {
+                    muted: videoElement.muted,
+                    volume: videoElement.volume
+                  });
+                }
                 if (remoteVideoRef.current && isMountedRef.current) {
                   handlePlay(remoteVideoRef.current, true);
                 }
               }}
               onError={(e) => {
-                console.error('Remote video error:', e);
+                console.error('❌ Remote video error:', e);
               }}
               onPlay={() => {
-                console.log('Remote video started playing');
+                console.log('🎥 Remote video started playing');
+                const videoElement = remoteVideoRef.current;
+                if (videoElement) {
+                  console.log('🔊 Audio status on play:', {
+                    muted: videoElement.muted,
+                    volume: videoElement.volume,
+                    audioTracks: remoteStream?.getAudioTracks().length || 0
+                  });
+                }
               }}
               onPlaying={() => {
-                console.log('Remote video is playing');
+                console.log('🎥 Remote video is playing');
+                const videoElement = remoteVideoRef.current;
+                if (videoElement && videoElement.muted) {
+                  console.warn('⚠️ Fixing muted remote video during playing');
+                  videoElement.muted = false;
+                  videoElement.volume = 1.0;
+                }
               }}
             />
             
@@ -328,16 +425,16 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
             ref={localVideoRef}
             autoPlay
             playsInline
-            muted={true} // **FIXED: Local video should always be muted**
+            muted={true} // **FIXED: Local video should always be muted to prevent feedback**
             className="w-full h-full object-cover"
             onLoadedData={() => {
-              console.log('Local video loadedData event fired');
+              console.log('🎥 Local video loadedData event fired');
               if (localVideoRef.current && isMountedRef.current) {
                 handlePlay(localVideoRef.current, false);
               }
             }}
             onError={(e) => {
-              console.error('Local video error:', e);
+              console.error('❌ Local video error:', e);
             }}
           />
           
