@@ -7,7 +7,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api/v1': {
-        target: 'https://localhost:8000',
+        target: 'https://intervu-5c12.onrender.com',
         changeOrigin: true,
         secure: true,
       },
