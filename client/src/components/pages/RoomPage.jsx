@@ -6,7 +6,6 @@ import { useAuth } from '../../context/auth/AuthContext';
 import CodeEditor from '../CodeEditor'; // Updated import path
 import Chat from '../Chat.jsx'; // Updated import path
 import ParticipantsList from '../ParticipationList.jsx'; // Updated import path
-import DeviceDebugger from '../DeviceDebugger.jsx';
 import { 
   VideoCameraIcon, 
   MicrophoneIcon, 
@@ -742,7 +741,7 @@ useEffect(() => {
           <ParticipantsList participants={participants} />
         </div>
       )}
-       <DeviceDebugger />
+     
     </div>
   );
 };
