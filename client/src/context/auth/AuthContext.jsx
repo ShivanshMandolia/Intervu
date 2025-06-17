@@ -4,7 +4,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 const AuthContext = createContext();
 
 // API Base URL - Update this to match your backend
-const API_BASE_URL = 'http://localhost:8000'; // Change this to your backend URL
+const API_BASE_URL = 'https://intervu-5c12.onrender.com'; // Change this to your backend URL
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
