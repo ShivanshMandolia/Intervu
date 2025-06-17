@@ -20,6 +20,7 @@ import {
 } from '@heroicons/react/24/outline';
 
 // Enhanced VideoCall component with better layout
+// Enhanced VideoCall component with better stream handling
 const VideoCall = ({ localStream, remoteStream, callStatus }) => {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
@@ -35,7 +36,7 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
     };
   }, []);
 
-  // Enhanced playback handling
+  // **FIXED: Enhanced playback handling with better error handling**
   const handlePlay = useCallback(async (element, isRemote = false) => {
     if (!element || !isMountedRef.current) return;
     
@@ -45,51 +46,72 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
     }
 
     try {
+      // **FIXED: Better readiness check**
       if (element.readyState < 2) {
-        console.log(`${isRemote ? 'Remote' : 'Local'} video not ready, waiting...`);
+        console.log(`${isRemote ? 'Remote' : 'Local'} video not ready (readyState: ${element.readyState}), waiting...`);
+        
         return new Promise((resolve) => {
-          const handleLoadedData = async () => {
-            element.removeEventListener('loadeddata', handleLoadedData);
+          let resolved = false;
+          
+          const handleCanPlay = async () => {
+            if (resolved) return;
+            resolved = true;
+            
+            element.removeEventListener('canplay', handleCanPlay);
+            element.removeEventListener('loadeddata', handleCanPlay);
+            
             if (isMountedRef.current && element.isConnected) {
               try {
+                console.log(`${isRemote ? 'Remote' : 'Local'} video ready, attempting play`);
                 await element.play();
                 if (isRemote) setShowRemotePlayButton(false);
                 else setShowLocalPlayButton(false);
+                console.log(`${isRemote ? 'Remote' : 'Local'} video playing successfully`);
               } catch (error) {
-                console.warn('Autoplay prevented:', error);
+                console.warn(`${isRemote ? 'Remote' : 'Local'} autoplay prevented:`, error);
                 if (isRemote) setShowRemotePlayButton(true);
                 else setShowLocalPlayButton(true);
               }
             }
             resolve();
           };
-          element.addEventListener('loadeddata', handleLoadedData);
+          
+          // Listen for both events
+          element.addEventListener('canplay', handleCanPlay);
+          element.addEventListener('loadeddata', handleCanPlay);
           
           // Timeout fallback
-          setTimeout(handleLoadedData, 3000);
+          setTimeout(() => {
+            if (!resolved) {
+              console.warn(`${isRemote ? 'Remote' : 'Local'} video timeout, forcing play attempt`);
+              handleCanPlay();
+            }
+          }, 5000);
         });
       } else {
+        console.log(`${isRemote ? 'Remote' : 'Local'} video ready, playing immediately`);
         await element.play();
         if (isRemote) setShowRemotePlayButton(false);
         else setShowLocalPlayButton(false);
       }
     } catch (error) {
       if (isMountedRef.current) {
-        console.warn('Autoplay prevented:', error);
+        console.warn(`${isRemote ? 'Remote' : 'Local'} autoplay prevented:`, error);
         if (isRemote) setShowRemotePlayButton(true);
         else setShowLocalPlayButton(true);
       }
     }
   }, []);
-  
 
   // Manual play handlers
   const handleManualPlayRemote = useCallback(async () => {
     if (!remoteVideoRef.current || !isMountedRef.current) return;
     
     try {
+      console.log('Manual remote play triggered');
       await remoteVideoRef.current.play();
       setShowRemotePlayButton(false);
+      console.log('Manual remote play successful');
     } catch (error) {
       console.error('Manual remote play failed:', error);
     }
@@ -99,22 +121,31 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
     if (!localVideoRef.current || !isMountedRef.current) return;
     
     try {
+      console.log('Manual local play triggered');
       await localVideoRef.current.play();
       setShowLocalPlayButton(false);
+      console.log('Manual local play successful');
     } catch (error) {
       console.error('Manual local play failed:', error);
     }
   }, []);
 
-  // Set local video stream
+  // **FIXED: Enhanced local video stream handling**
   useEffect(() => {
     const videoElement = localVideoRef.current;
     if (!videoElement || !localStream || !isMountedRef.current) return;
 
-    console.log('🎥 Setting local video stream');
+    console.log('🎥 Setting local video stream', {
+      tracks: localStream.getTracks().map(t => ({ kind: t.kind, enabled: t.enabled })),
+      streamId: localStream.id
+    });
     
     if (videoElement.srcObject !== localStream) {
       videoElement.srcObject = localStream;
+      
+      // **FIXED: Ensure local video is muted to prevent feedback**
+      videoElement.muted = true;
+      videoElement.volume = 0;
       
       const timer = setTimeout(() => {
         if (isMountedRef.current && videoElement.isConnected) {
@@ -125,17 +156,45 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
       return () => clearTimeout(timer);
     }
   }, [localStream, handlePlay]);
-  
 
-  // Set remote video stream
+  // **FIXED: Enhanced remote video stream handling**
   useEffect(() => {
     const videoElement = remoteVideoRef.current;
     if (!videoElement || !remoteStream || !isMountedRef.current) return;
 
-    console.log('🎥 Setting remote video stream');
+    console.log('🎥 Setting remote video stream', {
+      tracks: remoteStream.getTracks().map(t => ({ 
+        kind: t.kind, 
+        enabled: t.enabled, 
+        muted: t.muted,
+        readyState: t.readyState 
+      })),
+      streamId: remoteStream.id
+    });
     
     if (videoElement.srcObject !== remoteStream) {
       videoElement.srcObject = remoteStream;
+      
+      // **FIXED: Ensure remote video audio is enabled**
+      videoElement.muted = false;
+      videoElement.volume = 1.0;
+      
+      // **FIXED: Add additional event listeners for debugging**
+      const handleLoadStart = () => console.log('Remote video: loadstart');
+      const handleLoadedMetadata = () => console.log('Remote video: loadedmetadata');
+      const handleLoadedData = () => console.log('Remote video: loadeddata');
+      const handleCanPlay = () => console.log('Remote video: canplay');
+      const handlePlay = () => console.log('Remote video: play event');
+      const handlePlaying = () => console.log('Remote video: playing');
+      const handleError = (e) => console.error('Remote video error:', e);
+      
+      videoElement.addEventListener('loadstart', handleLoadStart);
+      videoElement.addEventListener('loadedmetadata', handleLoadedMetadata);
+      videoElement.addEventListener('loadeddata', handleLoadedData);
+      videoElement.addEventListener('canplay', handleCanPlay);
+      videoElement.addEventListener('play', handlePlay);
+      videoElement.addEventListener('playing', handlePlaying);
+      videoElement.addEventListener('error', handleError);
       
       const timer = setTimeout(() => {
         if (isMountedRef.current && videoElement.isConnected) {
@@ -143,9 +202,44 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
         }
       }, 100);
 
-      return () => clearTimeout(timer);
+      return () => {
+        clearTimeout(timer);
+        videoElement.removeEventListener('loadstart', handleLoadStart);
+        videoElement.removeEventListener('loadedmetadata', handleLoadedMetadata);
+        videoElement.removeEventListener('loadeddata', handleLoadedData);
+        videoElement.removeEventListener('canplay', handleCanPlay);
+        videoElement.removeEventListener('play', handlePlay);
+        videoElement.removeEventListener('playing', handlePlaying);
+        videoElement.removeEventListener('error', handleError);
+      };
     }
   }, [remoteStream, handlePlay]);
+
+  // **FIXED: Enhanced stream debugging**
+  useEffect(() => {
+    if (remoteStream && isMountedRef.current) {
+      console.log('🔊 Remote stream analysis:', {
+        id: remoteStream.id,
+        active: remoteStream.active,
+        tracks: remoteStream.getTracks().map(track => ({
+          kind: track.kind,
+          id: track.id,
+          label: track.label,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState
+        }))
+      });
+      
+      // Check for audio tracks specifically
+      const audioTracks = remoteStream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        console.warn('⚠️ No audio tracks in remote stream!');
+      } else {
+        console.log('✅ Remote audio tracks found:', audioTracks.length);
+      }
+    }
+  }, [remoteStream]);
 
   // Reset play buttons when streams change
   useEffect(() => {
@@ -159,9 +253,8 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
       setShowLocalPlayButton(false);
     }
   }, [localStream]);
-  
 
-   return (
+  return (
     <div className="flex-1 bg-gray-900 relative flex items-center justify-center">
       {/* Remote video (main) - with max dimensions */}
       <div className="w-full h-full max-w-4xl max-h-[80vh] flex items-center justify-center relative">
@@ -171,14 +264,22 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
               ref={remoteVideoRef}
               autoPlay
               playsInline
-              className="w-full h-full object-contain" // Changed from object-cover to object-contain
+              muted={false} // **FIXED: Ensure remote audio is not muted**
+              className="w-full h-full object-contain"
               onLoadedData={() => {
+                console.log('Remote video loadedData event fired');
                 if (remoteVideoRef.current && isMountedRef.current) {
                   handlePlay(remoteVideoRef.current, true);
                 }
               }}
               onError={(e) => {
                 console.error('Remote video error:', e);
+              }}
+              onPlay={() => {
+                console.log('Remote video started playing');
+              }}
+              onPlaying={() => {
+                console.log('Remote video is playing');
               }}
             />
             
@@ -220,16 +321,17 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
               ? 'top-4 right-4 w-32 h-24' 
               : remoteStream 
                 ? 'bottom-4 right-4 w-64 h-48' 
-                : 'bottom-4 right-4 w-80 h-60' // Better size when no remote stream
+                : 'bottom-4 right-4 w-80 h-60'
           }`}
         >
           <video
             ref={localVideoRef}
             autoPlay
             playsInline
-            muted
+            muted={true} // **FIXED: Local video should always be muted**
             className="w-full h-full object-cover"
             onLoadedData={() => {
+              console.log('Local video loadedData event fired');
               if (localVideoRef.current && isMountedRef.current) {
                 handlePlay(localVideoRef.current, false);
               }
@@ -297,7 +399,6 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
     </div>
   );
 };
-
 const Room = () => {
   const { roomId } = useParams();
   const navigate = useNavigate();
