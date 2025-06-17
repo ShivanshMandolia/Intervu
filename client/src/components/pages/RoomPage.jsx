@@ -6,6 +6,7 @@ import { useAuth } from '../../context/auth/AuthContext';
 import CodeEditor from '../CodeEditor'; // Updated import path
 import Chat from '../Chat.jsx'; // Updated import path
 import ParticipantsList from '../ParticipationList.jsx'; // Updated import path
+import DeviceDebugger from '../DeviceDebugger.jsx';
 import { 
   VideoCameraIcon, 
   MicrophoneIcon, 
@@ -81,6 +82,7 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
       }
     }
   }, []);
+  
 
   // Manual play handlers
   const handleManualPlayRemote = useCallback(async () => {
@@ -124,6 +126,7 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
       return () => clearTimeout(timer);
     }
   }, [localStream, handlePlay]);
+  
 
   // Set remote video stream
   useEffect(() => {
@@ -157,6 +160,7 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
       setShowLocalPlayButton(false);
     }
   }, [localStream]);
+  
 
    return (
     <div className="flex-1 bg-gray-900 relative flex items-center justify-center">
@@ -350,17 +354,57 @@ const Room = () => {
   const [showCodeEditor, setShowCodeEditor] = useState(true);
   const [mediaInitialized, setMediaInitialized] = useState(false);
   const [joinAttempted, setJoinAttempted] = useState(false);
+ useEffect(() => {
+  if (roomError) {
+    console.log('Room error detected:', roomError);
+    
+    // Check if the error indicates room is full
+    if (roomError.includes('full') || roomError.includes('Full') || roomError.includes('ROOM_FULL')) {
+      console.log('Room is full, redirecting to dashboard');
+      
+      // Set error in room context for dashboard to display
+      if (clearError) {
+        clearError(); // Clear current error first
+      }
+      
+      // Navigate to dashboard with error state instead of URL params
+      navigate('/dashboard', { 
+        replace: true,
+        state: { 
+          roomFullError: {
+            type: 'ROOM_FULL',
+            message: `Room ${roomId} is currently full (2/2 participants). Please try again later or create a new room.`,
+            roomId: roomId
+          }
+        }
+      });
+      return;
+    }
+    
+    // For other errors, show them but don't redirect immediately
+    console.error('Room error (not full):', roomError);
+  }
+}, [roomError, roomId, navigate, clearError]);
 
   // Initialize room with better error handling
-  useEffect(() => {
-    if (roomId && !isInRoom && user && joinRoom && !joinAttempted) {
-      console.log('🏠 Attempting to join room:', roomId);
-      setJoinAttempted(true);
-      joinRoom(roomId).catch(error => {
-        console.error('Failed to join room:', error);
-      });
-    }
-  }, [roomId, isInRoom, joinRoom, user, joinAttempted]);
+ // Also update the joinRoom useEffect to handle the full room error better:
+useEffect(() => {
+  if (roomId && !isInRoom && user && joinRoom && !joinAttempted) {
+    console.log('🏠 Attempting to join room:', roomId);
+    setJoinAttempted(true);
+    
+    joinRoom(roomId).catch(error => {
+      console.error('Failed to join room:', error);
+      
+      // Check if it's a room full error
+      const errorMessage = error?.message || error?.toString() || '';
+      if (errorMessage.includes('full') || errorMessage.includes('Full') || errorMessage.includes('ROOM_FULL')) {
+        console.log('Room join failed: Room is full');
+        // Don't set joinAttempted to false here, let the error useEffect handle the redirect
+      }
+    });
+  }
+}, [roomId, isInRoom, joinRoom, user, joinAttempted]);
 
   // Auto-initialize media when room is joined
   useEffect(() => {
@@ -398,21 +442,12 @@ const Room = () => {
   }, [toggleAudio]);
 
   // Handle end call
-  const handleEndCall = useCallback(async () => {
-    if (!endCall) return;
-    
-    try {
-      await endCall();
-      setMediaInitialized(false);
-    } catch (error) {
-      console.error('Failed to end call:', error);
-    }
-  }, [endCall]);
+ 
 
   // Handle leave room
   const handleLeaveRoom = useCallback(async () => {
     try {
-      await handleEndCall();
+     
       if (leaveRoom) {
         await leaveRoom();
       }
@@ -421,7 +456,7 @@ const Room = () => {
       console.error('Failed to leave room:', error);
       navigate('/');
     }
-  }, [handleEndCall, leaveRoom, navigate]);
+  }, [ leaveRoom, navigate]);
 
   // Clear errors on mount
   useEffect(() => {
@@ -493,15 +528,22 @@ const Room = () => {
     );
   }
 
-  if (!isInRoom) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-900">
-        <div className="text-center text-white">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p>Joining room: {roomId}</p>
-          {roomError && (
-            <div className="mt-4 p-4 bg-red-600 rounded-lg max-w-md">
-              <p className="text-sm mb-2">❌ {roomError}</p>
+ if (!isInRoom) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-900">
+      <div className="text-center text-white">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+        <p>Joining room: {roomId}</p>
+        {roomError && (
+          <div className="mt-4 p-4 bg-red-600 rounded-lg max-w-md">
+            <p className="text-sm mb-2">❌ {roomError}</p>
+            {/* Check if it's a room full error */}
+            {(roomError.includes('full') || roomError.includes('Full') || roomError.includes('ROOM_FULL')) ? (
+              <div className="text-center">
+                <p className="text-xs mb-3">Redirecting to dashboard...</p>
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mx-auto"></div>
+              </div>
+            ) : (
               <div className="flex space-x-2 justify-center">
                 <button
                   onClick={() => {
@@ -513,18 +555,19 @@ const Room = () => {
                   Retry
                 </button>
                 <button
-                  onClick={() => navigate('/')}
+                  onClick={() => navigate('/dashboard')}
                   className="px-3 py-1 bg-gray-700 hover:bg-gray-800 rounded text-sm"
                 >
                   Go Back
                 </button>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   return (
     <div className="min-h-screen bg-gray-900 flex flex-col">
@@ -672,13 +715,7 @@ const Room = () => {
               <MicrophoneIcon className="h-6 w-6" />
             </button>
             
-            <button
-              onClick={handleEndCall}
-              className="p-3 bg-red-600 hover:bg-red-700 text-white rounded-full transition-colors"
-              title="End call"
-            >
-              <PhoneXMarkIcon className="h-6 w-6" />
-            </button>
+          
           </>
         )}
       </div>
@@ -705,6 +742,7 @@ const Room = () => {
           <ParticipantsList participants={participants} />
         </div>
       )}
+       <DeviceDebugger />
     </div>
   );
 };

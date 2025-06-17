@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/auth/AuthContext';
 import { useRoom } from '../../context/RoomContext';
 import RoomFullMessage from '../RoomFullMessage';
@@ -10,45 +10,49 @@ import {
 
 const Dashboard = () => {
   const { user, logout } = useAuth();
-  const { error, setError } = useRoom(); // Make sure setError is available in context
+  const { error, setError, clearError } = useRoom();
   const navigate = useNavigate();
+  const location = useLocation();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Mock data - replace with actual API calls
   useEffect(() => {
-    // Simulate API call
     const fetchData = async () => {
       setLoading(true);
-      // Mock rooms data
-     
+      clearError();
       setLoading(false);
     };
-
     fetchData();
-  }, []);
+  }, [clearError]);
+
+  useEffect(() => {
+    const urlParams = new URLSearchParams(location.search);
+    const roomError = urlParams.get('error');
+    const roomId = urlParams.get('roomId');
+    const navigationState = location.state;
+    
+    if (roomError === 'room_full' && roomId) {
+      setError({
+        type: 'ROOM_FULL',
+        message: `Room ${roomId} is currently full (2/2 participants). Please try again later or create a new room.`,
+        roomId: roomId
+      });
+      navigate('/dashboard', { replace: true });
+    } else if (navigationState && navigationState.roomFullError) {
+      setError(navigationState.roomFullError);
+      navigate('/dashboard', { replace: true, state: {} });
+    }
+  }, [location.search, location.state, setError, navigate]);
 
   const handleCreateRoom = () => {
+    clearError();
     setShowCreateModal(true);
   };
 
   const handleJoinRoom = () => {
+    clearError();
     setShowJoinModal(true);
-  };
-
-  const handleEnterRoom = (roomId) => {
-    navigate(`/room/${roomId}`);
-  };
-
-  const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
   };
 
   if (loading) {
@@ -78,7 +82,6 @@ const Dashboard = () => {
             <div className="flex items-center">
               <h1 className="text-2xl font-bold bg-gradient-to-r from-emerald-600 via-teal-600 to-blue-600 bg-clip-text text-transparent">
                 intervU
-          
               </h1>
             </div>
             <div className="flex items-center space-x-4">
@@ -103,6 +106,31 @@ const Dashboard = () => {
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-col relative z-10">
+        {/* Error Alert Banner */}
+        {error && error.type === 'ROOM_FULL' && (
+          <div className="mb-6 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-xl p-4 shadow-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center">
+                <div className="flex-shrink-0">
+                  <div className="w-8 h-8 bg-gradient-to-br from-red-100 to-pink-100 rounded-lg flex items-center justify-center">
+                    <UserGroupIcon className="h-4 w-4 text-red-600" />
+                  </div>
+                </div>
+                <div className="ml-3">
+                  <p className="text-sm text-red-700 font-medium">Room Full</p>
+                  <p className="text-xs text-red-600">{error.message}</p>
+                </div>
+              </div>
+              <button
+                onClick={clearError}
+                className="text-red-400 hover:text-red-600 transition-colors"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Quick Actions */}
         <div className="mb-8">
           <h2 className="text-lg font-medium text-slate-800 mb-4">Quick Actions</h2>
@@ -174,7 +202,146 @@ const Dashboard = () => {
   );
 };
 
-// Enhanced Create Room Modal with capacity info
+// **FIXED: Join Room Modal using RoomContext's joinRoom function**
+const JoinRoomModal = ({ onClose, onRoomJoined }) => {
+  const { joinRoom, error: roomError, clearError } = useRoom();
+  const navigate = useNavigate();
+  const [roomId, setRoomId] = useState('');
+  const [isJoining, setIsJoining] = useState(false);
+  const [localError, setLocalError] = useState('');
+
+  // Clear local error when room error changes
+  useEffect(() => {
+    if (roomError && roomError.type === 'ROOM_FULL') {
+      setIsJoining(false);
+      onClose(); // Close modal when room is full
+    }
+  }, [roomError, onClose]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!roomId.trim()) {
+      setLocalError('Please enter a room ID');
+      return;
+    }
+
+    setIsJoining(true);
+    setLocalError('');
+    clearError(); // Clear any existing errors
+
+    try {
+      // Normalize the room ID
+      const normalizedRoomId = roomId.trim().startsWith('room-') 
+        ? roomId.trim() 
+        : `room-${roomId.trim()}`;
+
+      console.log('🚀 Attempting to join room:', normalizedRoomId);
+
+      // Use the joinRoom function from RoomContext
+      await joinRoom(normalizedRoomId);
+
+      // Wait a bit to see if there's an error
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // If no room full error occurred, proceed to room
+      if (!roomError || roomError.type !== 'ROOM_FULL') {
+        console.log('✅ Room join successful, navigating...');
+        onRoomJoined(normalizedRoomId);
+      }
+      
+    } catch (error) {
+      console.error('❌ Error joining room:', error);
+      setLocalError(error.message || 'Failed to join room');
+    } finally {
+      // Only set isJoining to false if we're not dealing with a room full error
+      if (!roomError || roomError.type !== 'ROOM_FULL') {
+        setIsJoining(false);
+      }
+    }
+  };
+
+  const handleRoomIdChange = (e) => {
+    setRoomId(e.target.value);
+    if (localError) setLocalError('');
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-800/50 backdrop-blur-sm flex items-center justify-center z-50">
+      <div className="bg-white/90 backdrop-blur-xl rounded-2xl p-8 w-full max-w-md shadow-2xl shadow-teal-300/50 border border-emerald-200/50">
+        <h2 className="text-xl font-semibold text-slate-800 mb-6">Join Room</h2>
+        
+        {/* Capacity Warning */}
+        <div className="mb-4 bg-gradient-to-r from-blue-50 to-teal-50 border border-blue-200 rounded-xl p-4">
+          <div className="flex">
+            <div className="flex-shrink-0">
+              <div className="w-8 h-8 bg-gradient-to-br from-blue-100 to-teal-100 rounded-lg flex items-center justify-center">
+                <UserGroupIcon className="h-4 w-4 text-blue-600" />
+              </div>
+            </div>
+            <div className="ml-3">
+              <p className="text-sm text-slate-700">
+                If the room is full (2/2), you'll be redirected back to the dashboard with an option to create a new room.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Error Message */}
+        {localError && (
+          <div className="mb-4 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-xl p-4">
+            <p className="text-sm text-red-700">{localError}</p>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit}>
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-slate-700 mb-2">
+              Room ID
+            </label>
+            <input
+              type="text"
+              value={roomId}
+              onChange={handleRoomIdChange}
+              className="w-full px-4 py-3 border border-emerald-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent bg-white/70 backdrop-blur-sm text-slate-800 placeholder-slate-500"
+              placeholder="Enter room ID (e.g., room-123 or 123)"
+              required
+              disabled={isJoining}
+            />
+            <p className="text-xs text-slate-500 mt-2">
+              You can enter the room ID with or without the "room-" prefix
+            </p>
+          </div>
+          <div className="flex justify-end space-x-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-6 py-3 text-slate-600 hover:text-slate-800 transition-colors"
+              disabled={isJoining}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-6 py-3 bg-gradient-to-r from-teal-600 to-blue-600 text-white rounded-xl hover:from-teal-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center transition-all duration-300 shadow-lg shadow-teal-300/50"
+              disabled={isJoining}
+            >
+              {isJoining ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                  Joining...
+                </>
+              ) : (
+                'Join Room'
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+// Create Room Modal (unchanged)
 const CreateRoomModal = ({ onClose, onRoomCreated }) => {
   const [roomName, setRoomName] = useState('');
   const [roomType, setRoomType] = useState('practice');
@@ -185,13 +352,11 @@ const CreateRoomModal = ({ onClose, onRoomCreated }) => {
     setIsCreating(true);
     
     try {
-      // Mock room creation - replace with actual API call
-      await new Promise(resolve => setTimeout(resolve, 500)); // Simulate API delay
+      await new Promise(resolve => setTimeout(resolve, 500));
       const roomId = `room-${Date.now()}`;
       onRoomCreated(roomId);
     } catch (error) {
       console.error('Error creating room:', error);
-      // Handle error - could show error message to user
     } finally {
       setIsCreating(false);
     }
@@ -202,7 +367,6 @@ const CreateRoomModal = ({ onClose, onRoomCreated }) => {
       <div className="bg-white/90 backdrop-blur-xl rounded-2xl p-8 w-full max-w-md shadow-2xl shadow-emerald-500/25 border border-emerald-200/50">
         <h2 className="text-xl font-semibold text-slate-800 mb-6">Create New Room</h2>
         
-        {/* Capacity Info */}
         <div className="mb-6 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-4">
           <div className="flex">
             <div className="flex-shrink-0">
@@ -259,140 +423,16 @@ const CreateRoomModal = ({ onClose, onRoomCreated }) => {
             </button>
             <button
               type="submit"
-              className="px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50 disabled:cursor-not-not transition-all duration-300 shadow-lg shadow-emerald-500/25"
+              className="px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 shadow-lg shadow-emerald-500/25"
               disabled={isCreating}
             >
               {isCreating ? (
                 <>
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                  Creating...
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2">
+                  Creating...</div>
                 </>
               ) : (
                 'Create Room'
-              )}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-};
-
-// Enhanced Join Room Modal with capacity info
-const JoinRoomModal = ({ onClose, onRoomJoined }) => {
-  const { setError } = useRoom(); // Access setError from room context
-  const [roomId, setRoomId] = useState('');
-  const [isJoining, setIsJoining] = useState(false);
-  const [error, setLocalError] = useState('');
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setIsJoining(true);
-    setLocalError('');
-
-    try {
-      // Clean up room ID (remove "room-" prefix if present)
-      const cleanRoomId = roomId.replace(/^room-/, '');
-      const finalRoomId = cleanRoomId.startsWith('room-') ? cleanRoomId : `room-${cleanRoomId}`;
-      
-      // Mock room joining - replace with actual API call
-      await new Promise(resolve => setTimeout(resolve, 500)); // Simulate API delay
-      
-      // Simulate room capacity check
-      const isRoomFull = Math.random() < 0.3; // 30% chance room is full for demo
-      
-      if (isRoomFull) {
-        // Set the global room error instead of local error
-        setError({
-          type: 'ROOM_FULL',
-          message: 'This room is currently full (2/2 participants). Please try again later or create a new room.',
-          roomId: finalRoomId
-        });
-        onClose(); // Close the modal
-        return;
-      }
-      
-      onRoomJoined(finalRoomId);
-    } catch (error) {
-      console.error('Error joining room:', error);
-      setLocalError('Failed to join room. Please check the room ID and try again.');
-    } finally {
-      setIsJoining(false);
-    }
-  };
-
-  const handleRoomIdChange = (e) => {
-    setRoomId(e.target.value);
-    if (error) setLocalError(''); // Clear error when user starts typing
-  };
-
-  return (
-    <div className="fixed inset-0 bg-slate-800/50 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-white/90 backdrop-blur-xl rounded-2xl p-8 w-full max-w-md shadow-2xl shadow-teal-300/50 border border-emerald-200/50">
-        <h2 className="text-xl font-semibold text-slate-800 mb-6">Join Room</h2>
-        
-        {/* Capacity Warning */}
-        <div className="mb-4 bg-gradient-to-r from-blue-50 to-teal-50 border border-blue-200 rounded-xl p-4">
-          <div className="flex">
-            <div className="flex-shrink-0">
-              <div className="w-8 h-8 bg-gradient-to-br from-blue-100 to-teal-100 rounded-lg flex items-center justify-center">
-                <UserGroupIcon className="h-4 w-4 text-blue-600" />
-              </div>
-            </div>
-            <div className="ml-3">
-              <p className="text-sm text-slate-700">
-                If the room is full (2/2), you'll be notified and can create a new room instead.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Error Message */}
-        {error && (
-          <div className="mb-4 bg-gradient-to-r from-red-50 to-pink-50 border border-red-200 rounded-xl p-4">
-            <p className="text-sm text-red-700">{error}</p>
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit}>
-          <div className="mb-6">
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              Room ID
-            </label>
-            <input
-              type="text"
-              value={roomId}
-              onChange={handleRoomIdChange}
-              className="w-full px-4 py-3 border border-emerald-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent bg-white/70 backdrop-blur-sm text-slate-800 placeholder-slate-500"
-              placeholder="Enter room ID (e.g., room-123 or 123)"
-              required
-              disabled={isJoining}
-            />
-            <p className="text-xs text-slate-500 mt-2">
-              You can enter the room ID with  the "room-" prefix
-            </p>
-          </div>
-          <div className="flex justify-end space-x-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-6 py-3 text-slate-600 hover:text-slate-800 transition-colors"
-              disabled={isJoining}
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="px-6 py-3 bg-gradient-to-r from-teal-600 to-blue-600 text-white rounded-xl hover:from-teal-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center transition-all duration-300 shadow-lg shadow-teal-300/50"
-              disabled={isJoining}
-            >
-              {isJoining ? (
-                <>
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                  Joining...
-                </>
-              ) : (
-                'Join Room'
               )}
             </button>
           </div>

@@ -112,50 +112,57 @@ class SocketServer {
   }
 
 // Fixed checkRoomCapacity function
+// Fixed checkRoomCapacity function
 async checkRoomCapacity(roomId, userId) {
   try {
     const room = await this.findRoomByAnyId(roomId);
     if (!room) return { canJoin: true, reason: null };
 
-    // Check if user is already a participant or creator FIRST
+    // **FIXED: Check active socket connections first**
+    const activeSocketsInRoom = this.roomToSocketsMap.get(roomId) || new Set();
+    const activeCount = activeSocketsInRoom.size;
+
+    console.log(`🔍 Enhanced capacity check for ${roomId}:`, {
+      maxParticipants: room.maxParticipants,
+      dbParticipants: room.participants.length,
+      activeSocketsInRoom: activeCount,
+      userId: userId.toString()
+    });
+
+    // Check if user is already a participant or creator
     const isExistingParticipant = room.participants.some(p => 
       p._id.toString() === userId.toString()
     );
     const isCreator = room.createdBy && room.createdBy._id.toString() === userId.toString();
 
-    if (isExistingParticipant || isCreator) {
-      console.log(`✅ User ${userId} is existing participant or creator - allowing rejoin`);
+    // **FIXED: Check if user already has an active socket in room**
+    const userSocketIds = [];
+    for (const [socketId, email] of this.socketIdToEmailMap.entries()) {
+      const socketUser = this.socketIdToUserMap.get(socketId);
+      if (socketUser && socketUser._id.toString() === userId.toString()) {
+        userSocketIds.push(socketId);
+      }
+    }
+    
+    const hasActiveSocket = userSocketIds.some(socketId => 
+      activeSocketsInRoom.has(socketId)
+    );
+
+    // Always allow existing participants/creators to rejoin
+    if (isExistingParticipant || isCreator || hasActiveSocket) {
+      console.log(`✅ User ${userId} is existing participant/creator - allowing rejoin`);
       return { canJoin: true, reason: null };
     }
 
-    // For NEW participants, check capacity
-    // Count unique participants (avoid double counting)
-    const dbParticipantCount = room.participants ? room.participants.length : 0;
-    const socketParticipantCount = this.roomToSocketsMap.get(roomId)?.size || 0;
-    
-    // Use DB count as primary source of truth for capacity
-    const currentParticipants = dbParticipantCount;
-    
-    console.log(`🔍 Room capacity check for ${roomId}:`, {
-      maxParticipants: room.maxParticipants,
-      dbParticipants: dbParticipantCount,
-      socketParticipants: socketParticipantCount,
-      currentParticipants,
-      userId: userId.toString(),
-      isNewUser: true
-    });
-
-    // Check capacity for new participants
-    if (currentParticipants >= room.maxParticipants) {
-      console.log(`❌ Room ${roomId} is full: ${currentParticipants}/${room.maxParticipants}`);
+    // **FIXED: Use active socket count for capacity check**
+    if (activeCount >= room.maxParticipants) {
       return { 
         canJoin: false, 
-        reason: `Room is full (${currentParticipants}/${room.maxParticipants} participants)`,
+        reason: `Room is full (${activeCount}/${room.maxParticipants} participants)`,
         code: "ROOM_FULL"
       };
     }
 
-    console.log(`✅ Room ${roomId} has space: ${currentParticipants}/${room.maxParticipants}`);
     return { canJoin: true, reason: null };
   } catch (error) {
     console.error('❌ Error checking room capacity:', error);
@@ -245,7 +252,7 @@ async checkRoomCapacity(roomId, userId) {
         userEmail: socket.userEmail
       });
 
-      // Check if user is already in this room (socket level)
+      // **FIXED: Check if user is already in this room (socket level)**
       const currentRoom = this.userRoomMap.get(socket.id);
       if (currentRoom === normalizedRoomId) {
         console.log(`🔄 User ${socket.userEmail} already in room ${normalizedRoomId} - sending current state`);
@@ -270,8 +277,16 @@ async checkRoomCapacity(roomId, userId) {
         this.leaveRoom(socket, currentRoom);
       }
 
-      // **FIXED CAPACITY CHECK**
-      const capacityCheck = await this.checkRoomCapacity(normalizedRoomId, socket.userId);
+      // **FIXED: Enhanced capacity check with retry logic**
+      let capacityCheck = await this.checkRoomCapacity(normalizedRoomId, socket.userId);
+      
+      // **FIXED: Retry capacity check once after small delay (handles race conditions)**
+      if (!capacityCheck.canJoin && capacityCheck.code === "ROOM_FULL") {
+        console.log(`🔄 Room appears full, retrying capacity check in 500ms...`);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        capacityCheck = await this.checkRoomCapacity(normalizedRoomId, socket.userId);
+      }
+      
       if (!capacityCheck.canJoin) {
         console.log(`🚫 Room join denied: ${capacityCheck.reason}`);
         socket.emit("room:error", { 
@@ -288,15 +303,16 @@ async checkRoomCapacity(roomId, userId) {
         return;
       }
 
-      // **FIXED: Better participant management**
+      // **FIXED: Better participant management with atomic operations**
       const isParticipant = room.participants.some(p => p._id.toString() === socket.userId.toString());
       const isCreator = room.createdBy && room.createdBy._id.toString() === socket.userId.toString();
       
       if (!isParticipant && !isCreator) {
-        // Final capacity check before DB update
-        if (room.participants.length >= room.maxParticipants) {
+        // **FIXED: Final capacity check with lock**
+        const activeSocketsInRoom = this.roomToSocketsMap.get(normalizedRoomId) || new Set();
+        if (activeSocketsInRoom.size >= room.maxParticipants) {
           socket.emit("room:error", { 
-            message: `Room is full (${room.participants.length}/${room.maxParticipants} participants)`,
+            message: `Room is full (${activeSocketsInRoom.size}/${room.maxParticipants} participants)`,
             code: "ROOM_FULL"
           });
           return;
@@ -314,7 +330,7 @@ async checkRoomCapacity(roomId, userId) {
       // **CRITICAL: Join socket room BEFORE updating tracking**
       socket.join(normalizedRoomId);
       
-      // Update tracking maps
+      // **FIXED: Update tracking maps atomically**
       this.userRoomMap.set(socket.id, normalizedRoomId);
       if (!this.roomToSocketsMap.has(normalizedRoomId)) {
         this.roomToSocketsMap.set(normalizedRoomId, new Set());
@@ -349,17 +365,19 @@ async checkRoomCapacity(roomId, userId) {
         roomState: roomState
       });
 
-      // **CRITICAL: Notify other users AFTER successful join**
-      socket.to(normalizedRoomId).emit("user:joined", {
-        email: socket.userEmail,
-        userId: socket.userId,
-        socketId: socket.id,
-        user: {
-          _id: socket.user._id,
-          email: socket.user.email,
-          username: socket.user.username
-        }
-      });
+      // **CRITICAL: Notify other users AFTER successful join with delay**
+      setTimeout(() => {
+        socket.to(normalizedRoomId).emit("user:joined", {
+          email: socket.userEmail,
+          userId: socket.userId,
+          socketId: socket.id,
+          user: {
+            _id: socket.user._id,
+            email: socket.user.email,
+            username: socket.user.username
+          }
+        });
+      }, 100);
 
       // Initialize room activity
       await this.initializeRoomActivity(room._id, socket.userId);

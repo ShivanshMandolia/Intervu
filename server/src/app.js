@@ -33,7 +33,7 @@ import roomRouter from "./routes/room.route.js";
 import roomActivityRouter from "./routes/RoomActivity.route.js"
 
 app.use("/api/v1/auth", authRouter);
-app.use("/api/v1/user", userRouter);
+app.use("/api/v1/users", userRouter);
 app.use("/api/v1/room", roomRouter);
 app.use("/api/v1/roomactivity", roomActivityRouter);
 

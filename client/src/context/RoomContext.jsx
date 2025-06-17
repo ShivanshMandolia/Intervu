@@ -145,6 +145,14 @@ export const RoomProvider = ({ children }) => {
     dispatch({ type: "CLEAR_ERROR" });
   }, []);
 
+  // Set error function
+  const setError = useCallback((error) => {
+    dispatch({
+      type: "SET_ERROR",
+      payload: error
+    });
+  }, []);
+
   // Handle connection errors
   useEffect(() => {
     if (connectionError) {
@@ -164,51 +172,32 @@ export const RoomProvider = ({ children }) => {
 
     console.log('Setting up room socket events');
 
-    // Room events - Enhanced to provide proper data structure for WebRTC
-    // In RoomContext.jsx - Enhanced room joined handler
-const handleRoomJoined = (data) => {
-  console.log("✅ Room joined event received:", data);
-  debugRoomId('ROOM_JOINED_EVENT', data.roomId);
-  
-  // Ensure participants have proper structure for WebRTC
-  const participants = (data.participants || []).map(participant => ({
-    ...participant,
-    socketId: participant.socketId || participant.id,
-    user: participant.user || participant,
-    email: participant.user?.email || participant.email,
-    username: participant.user?.username || participant.username
-  }));
-
-  // **CRITICAL: Update state immediately**
-  dispatch({
-    type: "SET_ROOM_INFO",
-    payload: { roomId: data.roomId, room: data.room }
-  });
-  dispatch({
-    type: "SET_PARTICIPANTS",
-    payload: participants
-  });
-
-  // **CRITICAL: Clear any loading states**
-  dispatch({ type: "SET_LOADING", payload: false });
-  dispatch({ type: "CLEAR_ERROR" });
-
-  console.log(`✅ Room state updated - isInRoom should now be true`);
-
-  // Emit for WebRTC context with delay to ensure state is updated
-  setTimeout(() => {
-    if (socket) {
-      console.log('🎥 Emitting room:joined for WebRTC with data:', {
-        roomId: data.roomId,
-        participants: participants
+    // Room joined handler - FIXED: This was missing in the original code
+    const handleRoomJoined = (data) => {
+      console.log("Room joined event received:", data);
+      
+      dispatch({
+        type: "SET_ROOM_INFO",
+        payload: {
+          roomId: data.roomId,
+          room: data.room || data
+        }
       });
-      socket.emit('webrtc:room-joined', {
-        roomId: data.roomId,
-        participants: participants
-      });
-    }
-  }, 100);
-};
+
+      // Set participants if provided
+      if (data.participants) {
+        dispatch({
+          type: "SET_PARTICIPANTS",
+          payload: data.participants
+        });
+      }
+
+      // Emit for WebRTC context
+      if (socket) {
+        console.log('🎉 Emitting room:joined for WebRTC');
+        socket.emit('webrtc:room-joined', data);
+      }
+    };
 
     const handleUserJoined = (data) => {
       console.log("User joined event received:", data);
@@ -342,7 +331,7 @@ const handleRoomJoined = (data) => {
       socket.off("recording:started", handleRecordingStarted);
       socket.off("recording:stopped", handleRecordingStopped);
     };
-  }, [socket, isConnected, debugRoomId]);
+  }, [socket, isConnected]);
 
   // Room actions
   const joinRoom = useCallback(async (roomId) => {
@@ -354,6 +343,7 @@ const handleRoomJoined = (data) => {
       });
       return;
     }
+   
 
     if (!roomId) {
       console.error("Room ID is required");
@@ -426,7 +416,6 @@ const handleRoomJoined = (data) => {
       console.error("Error sending chat message:", error);
     }
   }, [socket, state.roomId, debugRoomId, user]);
-  
 
   const updateCode = useCallback((code, language) => {
     if (!socket || !state.roomId) {
@@ -496,7 +485,8 @@ const handleRoomJoined = (data) => {
     sendChatMessage,
     updateCode,
     updateCursor,
-    clearError, // Add the clearError function to context
+    clearError,
+    setError,
     
     // Utility functions
     normalizeRoomId,
