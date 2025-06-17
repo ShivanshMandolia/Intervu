@@ -5,7 +5,7 @@ import { useAuth } from './auth/AuthContext';
 const UserProfileContext = createContext();
 
 // API Base URL - Should match your backend
-const API_BASE_URL = 'http://localhost:8000'; // Change this to your backend URL
+const API_BASE_URL = 'https://intervu-5c12.onrender.com'; // Change this to your backend URL
 
 export const UserProfileProvider = ({ children }) => {
   const { user, setUser } = useAuth();
