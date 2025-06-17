@@ -158,17 +158,17 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
     }
   }, [localStream]);
 
-  return (
-    <div className="flex-1 bg-gray-900 relative">
-      {/* Remote video (main) */}
-      <div className="w-full h-full flex items-center justify-center relative">
+   return (
+    <div className="flex-1 bg-gray-900 relative flex items-center justify-center">
+      {/* Remote video (main) - with max dimensions */}
+      <div className="w-full h-full max-w-4xl max-h-[80vh] flex items-center justify-center relative">
         {remoteStream ? (
           <>
             <video
               ref={remoteVideoRef}
               autoPlay
               playsInline
-              className="w-full h-full object-cover"
+              className="w-full h-full object-contain" // Changed from object-cover to object-contain
               onLoadedData={() => {
                 if (remoteVideoRef.current && isMountedRef.current) {
                   handlePlay(remoteVideoRef.current, true);
@@ -217,7 +217,7 @@ const VideoCall = ({ localStream, remoteStream, callStatus }) => {
               ? 'top-4 right-4 w-32 h-24' 
               : remoteStream 
                 ? 'bottom-4 right-4 w-64 h-48' 
-                : 'top-4 right-4 w-80 h-60'
+                : 'bottom-4 right-4 w-80 h-60' // Better size when no remote stream
           }`}
         >
           <video
@@ -528,10 +528,7 @@ const Room = () => {
 
   return (
     <div className="min-h-screen bg-gray-900 flex flex-col">
-      {/* Debug info */}
-      <div className="bg-green-900 text-green-200 px-4 py-1 text-xs">
-        🐛 DEBUG: Room loaded successfully | User: {user?.name || user?.email} | Participants: {participants?.length || 0}
-      </div>
+      
 
       {/* Header */}
       <div className="bg-gray-800 border-b border-gray-700 px-4 py-3">
@@ -618,78 +615,83 @@ const Room = () => {
       )}
 
       {/* Main content */}
-      <div className="flex-1 flex">
-        {/* Video call section */}
-        <div className={`${showCodeEditor ? 'w-1/2' : 'flex-1'} flex flex-col`}>
-          <VideoCall
-            localStream={localStream}
-            remoteStream={remoteStream}
-            callStatus={callStatus}
-          />
-          
-          {/* Media controls */}
-          <div className="bg-gray-800 border-t border-gray-700 px-4 py-3">
-            <div className="flex items-center justify-center space-x-4">
-              {!localStream ? (
-                <button
-                  onClick={() => {
-                    if (getUserMedia) {
-                      getUserMedia().catch(error => {
-                        console.error('Failed to get user media:', error);
-                      });
-                    }
-                  }}
-                  className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center space-x-2"
-                >
-                  <VideoCameraIcon className="h-5 w-5" />
-                  <span>Start Video</span>
-                </button>
-              ) : (
-                <>
-                  <button
-                    onClick={handleToggleVideo}
-                    className={`p-3 rounded-full transition-colors ${
-                      isVideoEnabled
-                        ? 'bg-gray-700 hover:bg-gray-600 text-white'
-                        : 'bg-red-600 hover:bg-red-700 text-white'
-                    }`}
-                    title={isVideoEnabled ? 'Turn off camera' : 'Turn on camera'}
-                  >
-                    <VideoCameraIcon className="h-6 w-6" />
-                  </button>
-                  
-                  <button
-                    onClick={handleToggleAudio}
-                    className={`p-3 rounded-full transition-colors ${
-                      isAudioEnabled
-                        ? 'bg-gray-700 hover:bg-gray-600 text-white'
-                        : 'bg-red-600 hover:bg-red-700 text-white'
-                    }`}
-                    title={isAudioEnabled ? 'Mute microphone' : 'Unmute microphone'}
-                  >
-                    <MicrophoneIcon className="h-6 w-6" />
-                  </button>
-                  
-                  <button
-                    onClick={handleEndCall}
-                    className="p-3 bg-red-600 hover:bg-red-700 text-white rounded-full transition-colors"
-                    title="End call"
-                  >
-                    <PhoneXMarkIcon className="h-6 w-6" />
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-        
-        {/* Code editor panel */}
-        {showCodeEditor && (
-          <div className="w-1/2 border-l border-gray-700">
-            <CodeEditor roomId={roomId} />
-          </div>
+     {/* Main content */}
+<div className="flex-1 flex justify-center">
+  {/* Video call section */}
+  <div className={`${
+    showCodeEditor 
+      ? 'w-1/2' 
+      : 'w-full max-w-6xl' // Constrain max width when code editor is hidden
+  } flex flex-col`}>
+    <VideoCall
+      localStream={localStream}
+      remoteStream={remoteStream}
+      callStatus={callStatus}
+    />
+    
+    {/* Media controls */}
+    <div className="bg-gray-800 border-t border-gray-700 px-4 py-3">
+      <div className="flex items-center justify-center space-x-4">
+        {!localStream ? (
+          <button
+            onClick={() => {
+              if (getUserMedia) {
+                getUserMedia().catch(error => {
+                  console.error('Failed to get user media:', error);
+                });
+              }
+            }}
+            className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center space-x-2"
+          >
+            <VideoCameraIcon className="h-5 w-5" />
+            <span>Start Video</span>
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={handleToggleVideo}
+              className={`p-3 rounded-full transition-colors ${
+                isVideoEnabled
+                  ? 'bg-gray-700 hover:bg-gray-600 text-white'
+                  : 'bg-red-600 hover:bg-red-700 text-white'
+              }`}
+              title={isVideoEnabled ? 'Turn off camera' : 'Turn on camera'}
+            >
+              <VideoCameraIcon className="h-6 w-6" />
+            </button>
+            
+            <button
+              onClick={handleToggleAudio}
+              className={`p-3 rounded-full transition-colors ${
+                isAudioEnabled
+                  ? 'bg-gray-700 hover:bg-gray-600 text-white'
+                  : 'bg-red-600 hover:bg-red-700 text-white'
+              }`}
+              title={isAudioEnabled ? 'Mute microphone' : 'Unmute microphone'}
+            >
+              <MicrophoneIcon className="h-6 w-6" />
+            </button>
+            
+            <button
+              onClick={handleEndCall}
+              className="p-3 bg-red-600 hover:bg-red-700 text-white rounded-full transition-colors"
+              title="End call"
+            >
+              <PhoneXMarkIcon className="h-6 w-6" />
+            </button>
+          </>
         )}
       </div>
+    </div>
+  </div>
+  
+  {/* Code editor panel */}
+  {showCodeEditor && (
+    <div className="w-1/2 border-l border-gray-700">
+      <CodeEditor roomId={roomId} />
+    </div>
+  )}
+</div>
 
       {/* Side panels */}
       {showChat && (

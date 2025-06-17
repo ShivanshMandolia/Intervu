@@ -1,92 +1,159 @@
-// frontend/src/context/WebRTCContext.jsx - ENHANCED WITH TEST MODE
-import React, { createContext, useContext, useReducer, useCallback, useRef, useEffect } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useReducer,
+  useCallback,
+  useRef,
+  useEffect,
+} from 'react';
 import { useSocket } from './SocketContext';
 import { useAuth } from './auth/AuthContext';
 
 const WebRTCContext = createContext(null);
 
-// Enhanced peer service class
-/ Enhanced peer service class with modern WebRTC APIs
+// Enhanced peer service class with modern WebRTC APIs
+// Enhanced PeerService class with better connection handling
 class PeerService {
   constructor() {
     this.peer = null;
     this.localStream = null;
     this.remoteStream = null;
     this.pendingIceCandidates = [];
+    this.isOfferAnswerExchangeComplete = false;
+    this.connectionState = 'new';
   }
 
   createPeerConnection() {
     if (this.peer) {
+      console.log('🔄 Closing existing peer connection');
       this.peer.close();
     }
 
     this.peer = new RTCPeerConnection({
       iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:global.stun.twilio.com:3478' },
+        // Add TURN servers for better connectivity
         {
-          urls: [
-            "stun:stun.l.google.com:19302",
-            "stun:global.stun.twilio.com:3478",
-          ],
-        },
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
       ],
+      iceCandidatePoolSize: 10,
     });
 
     console.log('🔗 New peer connection created');
-    
-    // Set up connection state monitoring
+    this.isOfferAnswerExchangeComplete = false;
+    this.pendingIceCandidates = [];
+    this.connectionState = 'new';
+
+    // Enhanced connection state monitoring
     this.peer.onconnectionstatechange = () => {
-      console.log('🔗 Connection state:', this.peer.connectionState);
+      this.connectionState = this.peer.connectionState;
+      console.log('🔗 Connection state:', this.connectionState);
+      
+      // Handle failed connections
+      if (this.connectionState === 'failed') {
+        console.log('🔄 Connection failed, attempting restart');
+        this.restartIce();
+      }
     };
 
     this.peer.oniceconnectionstatechange = () => {
       console.log('🧊 ICE connection state:', this.peer.iceConnectionState);
+      
+      // Handle ICE connection failures
+      if (this.peer.iceConnectionState === 'failed') {
+        console.log('🔄 ICE connection failed, restarting ICE');
+        this.restartIce();
+      }
+    };
+
+    this.peer.onicegatheringstatechange = () => {
+      console.log('🧊 ICE gathering state:', this.peer.iceGatheringState);
     };
 
     return this.peer;
   }
 
-  // FIXED: Use addTrack instead of deprecated addStream
+  // Add ICE restart capability
+  async restartIce() {
+    if (this.peer && this.peer.connectionState !== 'closed') {
+      try {
+        await this.peer.restartIce();
+        console.log('🔄 ICE restart initiated');
+      } catch (error) {
+        console.error('❌ ICE restart failed:', error);
+      }
+    }
+  }
+
+  // Enhanced stream addition with better error handling
   addLocalStream(stream) {
     if (!this.peer || !stream) {
       console.warn('⚠️ Cannot add stream: peer or stream missing');
-      return;
+      return false;
     }
 
     console.log('📡 Adding local stream tracks to peer connection');
-    
-    // Remove existing tracks first
-    const senders = this.peer.getSenders();
-    senders.forEach(sender => {
-      if (sender.track) {
-        this.peer.removeTrack(sender);
-        console.log('🗑️ Removed existing track:', sender.track.kind);
-      }
-    });
 
-    // Add new tracks
-    stream.getTracks().forEach(track => {
-      console.log('🎵 Adding track:', track.kind, track.id, track.label);
-      const sender = this.peer.addTrack(track, stream);
-      console.log('✅ Track added successfully, sender:', sender);
-    });
+    try {
+      // Remove existing senders first
+      const senders = this.peer.getSenders();
+      senders.forEach((sender) => {
+        if (sender.track) {
+          this.peer.removeTrack(sender);
+          console.log('🗑️ Removed existing track:', sender.track.kind);
+        }
+      });
 
-    this.localStream = stream;
+      // Add new tracks with error handling
+      const addedTracks = [];
+      stream.getTracks().forEach((track) => {
+        try {
+          console.log('🎵 Adding track:', track.kind, track.id);
+          const sender = this.peer.addTrack(track, stream);
+          addedTracks.push({ track, sender });
+          console.log('✅ Track added successfully');
+        } catch (error) {
+          console.error('❌ Failed to add track:', track.kind, error);
+        }
+      });
+
+      this.localStream = stream;
+      console.log(`✅ Successfully added ${addedTracks.length} tracks`);
+      return true;
+    } catch (error) {
+      console.error('❌ Error adding local stream:', error);
+      return false;
+    }
   }
 
-  // FIXED: Enhanced offer creation with proper constraints
   async getOffer() {
     if (!this.peer) {
       throw new Error('Peer connection not initialized');
     }
 
     try {
+      console.log('📤 Creating offer...');
+      
+      // Ensure we have transceivers for audio and video
+      if (this.peer.getTransceivers().length === 0) {
+        this.peer.addTransceiver('audio', { direction: 'sendrecv' });
+        this.peer.addTransceiver('video', { direction: 'sendrecv' });
+        console.log('📡 Added transceivers for audio and video');
+      }
+
       const offer = await this.peer.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
       });
-      
+
       await this.peer.setLocalDescription(offer);
       console.log('📤 Created and set local offer:', offer.type);
+      
       return offer;
     } catch (error) {
       console.error('❌ Error creating offer:', error);
@@ -94,7 +161,6 @@ class PeerService {
     }
   }
 
-  // FIXED: Enhanced answer creation
   async getAnswer(offer) {
     if (!this.peer) {
       throw new Error('Peer connection not initialized');
@@ -102,12 +168,19 @@ class PeerService {
 
     try {
       console.log('📥 Setting remote description and creating answer');
-      await this.peer.setRemoteDescription(new RTCSessionDescription(offer));
       
+      // Set remote description first
+      await this.peer.setRemoteDescription(new RTCSessionDescription(offer));
+      console.log('✅ Remote description set');
+
+      // Create and set local description (answer)
       const answer = await this.peer.createAnswer();
       await this.peer.setLocalDescription(answer);
       
       console.log('📤 Created and set local answer:', answer.type);
+      
+      // Mark offer-answer exchange as complete
+      this.isOfferAnswerExchangeComplete = true;
       
       // Process any pending ICE candidates
       await this.processPendingIceCandidates();
@@ -128,6 +201,9 @@ class PeerService {
       console.log('📥 Setting remote description (answer)');
       await this.peer.setRemoteDescription(new RTCSessionDescription(answer));
       
+      // Mark offer-answer exchange as complete
+      this.isOfferAnswerExchangeComplete = true;
+      
       // Process any pending ICE candidates
       await this.processPendingIceCandidates();
       
@@ -138,15 +214,15 @@ class PeerService {
     }
   }
 
-  // FIXED: Better ICE candidate handling
   async addIceCandidate(candidate) {
     if (!this.peer) {
       console.warn('⚠️ Peer connection not ready for ICE candidate');
       return;
     }
 
-    if (!this.peer.remoteDescription) {
-      console.log('🧊 Queuing ICE candidate (no remote description yet)');
+    // Queue candidate if offer/answer exchange is not complete
+    if (!this.isOfferAnswerExchangeComplete) {
+      console.log('🧊 Queuing ICE candidate (offer-answer exchange not complete)');
       this.pendingIceCandidates.push(candidate);
       return;
     }
@@ -156,15 +232,19 @@ class PeerService {
       console.log('✅ ICE candidate added successfully');
     } catch (error) {
       console.error('❌ Error adding ICE candidate:', error);
+      // Don't throw here, just log the error
     }
   }
 
   async processPendingIceCandidates() {
     if (this.pendingIceCandidates.length === 0) return;
-
+    
     console.log(`🧊 Processing ${this.pendingIceCandidates.length} pending ICE candidates`);
     
-    for (const candidate of this.pendingIceCandidates) {
+    const candidates = [...this.pendingIceCandidates];
+    this.pendingIceCandidates = [];
+    
+    for (const candidate of candidates) {
       try {
         await this.peer.addIceCandidate(new RTCIceCandidate(candidate));
         console.log('✅ Pending ICE candidate added');
@@ -172,8 +252,6 @@ class PeerService {
         console.error('❌ Error adding pending ICE candidate:', error);
       }
     }
-    
-    this.pendingIceCandidates = [];
   }
 
   close() {
@@ -182,38 +260,34 @@ class PeerService {
       this.peer.close();
       this.peer = null;
     }
+    
     this.localStream = null;
     this.remoteStream = null;
     this.pendingIceCandidates = [];
+    this.isOfferAnswerExchangeComplete = false;
+    this.connectionState = 'closed';
   }
 }
-
 const webrtcReducer = (state, action) => {
   switch (action.type) {
     case 'SET_LOCAL_STREAM':
       return { ...state, localStream: action.payload };
-    
     case 'SET_REMOTE_STREAM':
       return { ...state, remoteStream: action.payload };
-    
     case 'SET_CALL_STATUS':
       return { ...state, callStatus: action.payload };
-    
     case 'SET_ERROR':
       return { ...state, error: action.payload };
-    
     case 'CLEAR_ERROR':
       return { ...state, error: null };
-    
     case 'SET_DEVICE_STATUS':
       return { ...state, deviceStatus: action.payload };
-    
     case 'SET_TEST_MODE':
       return { ...state, isTestMode: action.payload };
-    
+    case 'SET_REMOTE_SOCKET_ID':
+      return { ...state, remoteSocketId: action.payload };
     case 'RESET':
       return { ...initialState };
-    
     default:
       return state;
   }
@@ -224,8 +298,13 @@ const initialState = {
   remoteStream: null,
   callStatus: 'idle', // idle, connecting, connected
   error: null,
-  deviceStatus: { hasVideo: false, hasAudio: false, isChecking: true },
+  deviceStatus: {
+    hasVideo: false,
+    hasAudio: false,
+    isChecking: true,
+  },
   isTestMode: false,
+  remoteSocketId: null,
 };
 
 export const useWebRTC = () => {
@@ -240,10 +319,7 @@ export const WebRTCProvider = ({ children }) => {
   const { socket, isConnected } = useSocket();
   const { user } = useAuth();
   const [state, dispatch] = useReducer(webrtcReducer, initialState);
-  
   const peerServiceRef = useRef(new PeerService());
-  const currentRoomRef = useRef(null);
-  const remoteSocketIdRef = useRef(null);
   const isInitializedRef = useRef(false);
   const mediaRetryCount = useRef(0);
   const maxRetries = 3;
@@ -255,109 +331,90 @@ export const WebRTCProvider = ({ children }) => {
     const isDev = process.env.NODE_ENV === 'development';
     const hasTestParam = window.location.search.includes('test=true');
     const isTestMode = isDev && hasTestParam;
-    
     if (isTestMode !== state.isTestMode) {
       dispatch({ type: 'SET_TEST_MODE', payload: isTestMode });
       console.log('🧪 Test mode:', isTestMode ? 'ENABLED' : 'DISABLED');
     }
-    
     return isTestMode;
   }, [state.isTestMode]);
 
   // Create fake video stream for testing
   const createTestVideoStream = useCallback((label = 'Test User', color = null) => {
     console.log('🧪 Creating test video stream:', label);
-    
     const canvas = document.createElement('canvas');
     canvas.width = 640;
     canvas.height = 480;
     const ctx = canvas.getContext('2d');
-    
-    // Store canvas reference for cleanup
     testCanvasRef.current = canvas;
-    
-    // Generate random color if not provided
     let hue = color || Math.random() * 360;
-    
     const animate = () => {
       hue = (hue + 1) % 360;
-      
       // Gradient background
       const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
       gradient.addColorStop(0, `hsl(${hue}, 70%, 40%)`);
       gradient.addColorStop(1, `hsl(${(hue + 60) % 360}, 70%, 60%)`);
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
       // Animated circles
       const time = Date.now() * 0.001;
       for (let i = 0; i < 5; i++) {
-        const x = canvas.width/2 + Math.cos(time + i) * 100;
-        const y = canvas.height/2 + Math.sin(time + i * 0.7) * 80;
+        const x = canvas.width / 2 + Math.cos(time + i) * 100;
+        const y = canvas.height / 2 + Math.sin(time + i * 0.7) * 80;
         const radius = 20 + Math.sin(time * 2 + i) * 10;
-        
         ctx.beginPath();
         ctx.arc(x, y, radius, 0, Math.PI * 2);
         ctx.fillStyle = `hsla(${(hue + i * 72) % 360}, 80%, 80%, 0.3)`;
         ctx.fill();
       }
-      
       // User label
       ctx.fillStyle = 'white';
       ctx.font = 'bold 48px Arial';
       ctx.textAlign = 'center';
       ctx.strokeStyle = 'black';
       ctx.lineWidth = 2;
-      ctx.strokeText(label, canvas.width/2, canvas.height/2 - 40);
-      ctx.fillText(label, canvas.width/2, canvas.height/2 - 40);
-      
+      ctx.strokeText(label, canvas.width / 2, canvas.height / 2 - 40);
+      ctx.fillText(label, canvas.width / 2, canvas.height / 2 - 40);
       // Time display
       ctx.font = '24px Arial';
       const timeStr = new Date().toLocaleTimeString();
-      ctx.strokeText(timeStr, canvas.width/2, canvas.height/2 + 20);
-      ctx.fillText(timeStr, canvas.width/2, canvas.height/2 + 20);
-      
+      ctx.strokeText(timeStr, canvas.width / 2, canvas.height / 2 + 20);
+      ctx.fillText(timeStr, canvas.width / 2, canvas.height / 2 + 20);
       // Test mode indicator
       ctx.font = 'bold 16px Arial';
       ctx.fillStyle = '#ff6b6b';
       ctx.strokeStyle = 'white';
       ctx.lineWidth = 1;
-      ctx.strokeText('🧪 TEST MODE', canvas.width/2, canvas.height - 30);
-      ctx.fillText('🧪 TEST MODE', canvas.width/2, canvas.height - 30);
-      
+      ctx.strokeText('🧪 TEST MODE', canvas.width / 2, canvas.height - 30);
+      ctx.fillText('🧪 TEST MODE', canvas.width / 2, canvas.height - 30);
       testAnimationRef.current = requestAnimationFrame(animate);
     };
-    
     animate();
-    
+
     // Create fake audio track using Web Audio API
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const oscillator = audioContext.createOscillator();
     const gainNode = audioContext.createGain();
-    
     oscillator.connect(gainNode);
     gainNode.connect(audioContext.destination);
-    
-    // Create very quiet tone so it doesn't disturb
+    // Very quiet tone
     gainNode.gain.setValueAtTime(0.001, audioContext.currentTime);
     oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
     oscillator.start();
-    
-    // Get the destination as a MediaStream
     const destination = audioContext.createMediaStreamDestination();
     gainNode.connect(destination);
-    
     // Combine video and audio streams
     const videoStream = canvas.captureStream(30);
     const audioStream = destination.stream;
-    
     const combinedStream = new MediaStream([
       ...videoStream.getVideoTracks(),
-      ...audioStream.getAudioTracks()
+      ...audioStream.getAudioTracks(),
     ]);
-    
-    console.log('✅ Test stream created with tracks:', combinedStream.getTracks().map(t => `${t.kind}: ${t.label || 'unlabeled'}`));
-    
+    console.log(
+      '✅ Test stream created with tracks:',
+      combinedStream
+        .getTracks()
+        .map((t) => `${t.kind}: ${t.label || 'unlabeled'}`)
+    );
     return combinedStream;
   }, []);
 
@@ -374,255 +431,164 @@ export const WebRTCProvider = ({ children }) => {
   const checkMediaDevices = useCallback(async () => {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
-      const hasVideo = devices.some(device => device.kind === 'videoinput');
-      const hasAudio = devices.some(device => device.kind === 'audioinput');
-      
+      const hasVideo = devices.some((device) => device.kind === 'videoinput');
+      const hasAudio = devices.some((device) => device.kind === 'audioinput');
       console.log('📱 Media devices available:', {
-        videoInputs: devices.filter(d => d.kind === 'videoinput').length,
-        audioInputs: devices.filter(d => d.kind === 'audioinput').length,
+        videoInputs: devices.filter((d) => d.kind === 'videoinput').length,
+        audioInputs: devices.filter((d) => d.kind === 'audioinput').length,
         hasVideo,
-        hasAudio
+        hasAudio,
       });
-      
-      dispatch({ 
-        type: 'SET_DEVICE_STATUS', 
-        payload: { hasVideo, hasAudio, isChecking: false } 
+      dispatch({
+        type: 'SET_DEVICE_STATUS',
+        payload: { hasVideo, hasAudio, isChecking: false },
       });
-      
-      if (!hasVideo && !hasAudio) {
-        dispatch({ type: 'SET_ERROR', payload: 'No media devices detected' });
-      }
-      
       return { hasVideo, hasAudio };
     } catch (error) {
       console.error('❌ Device enumeration error:', error);
-      dispatch({ 
-        type: 'SET_DEVICE_STATUS', 
-        payload: { hasVideo: false, hasAudio: false, isChecking: false } 
+      dispatch({
+        type: 'SET_DEVICE_STATUS',
+        payload: { hasVideo: false, hasAudio: false, isChecking: false },
       });
       return { hasVideo: false, hasAudio: false };
     }
   }, []);
 
   // Enhanced getUserMedia with test mode support
-  const getUserMedia = useCallback(async (forceRetry = false) => {
-    try {
-      console.log('📱 Getting user media...');
-      
-      const isTestMode = detectTestMode();
-      
-      // Check if in test mode (add ?test=true to URL)
-      if (isTestMode) {
-        console.log('🧪 Test mode enabled - using fake video stream');
-        const testStream = createTestVideoStream(`User ${Math.floor(Math.random() * 100)}`, Math.random() * 360);
-        dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
-        dispatch({ type: 'CLEAR_ERROR' });
-        return testStream;
-      }
-      
-      if (!forceRetry && mediaRetryCount.current >= maxRetries) {
-        // Fallback to test mode if max retries reached
-        console.log('🧪 Max retries reached - using test mode');
-        const testStream = createTestVideoStream('Test User (Fallback)', 0);
-        dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
-        dispatch({ type: 'SET_ERROR', payload: 'Max retries reached. Using test mode. Add ?test=true to URL for intentional test mode.' });
-        return testStream;
-      }
-      
-      if (forceRetry) {
-        mediaRetryCount.current = 0;
-      }
-      
-      const { hasVideo, hasAudio } = await checkMediaDevices();
-      
-      if (!hasVideo && !hasAudio) {
-        throw new Error('No media devices available');
-      }
-      
-      let stream;
-      const constraints = [];
-      
-      // Strategy 1: Try video + audio
-      if (hasVideo && hasAudio) {
-        constraints.push({ video: true, audio: true });
-      }
-      
-      // Strategy 2: Try audio only  
-      if (hasAudio) {
-        constraints.push({ audio: true });
-      }
-      
-      // Strategy 3: Try video only
-      if (hasVideo) {
-        constraints.push({ video: true });
-      }
-      
-      let lastError;
-      for (const constraint of constraints) {
-        try {
-          console.log('🎯 Trying constraint:', constraint);
-          stream = await navigator.mediaDevices.getUserMedia(constraint);
-          console.log('✅ Successfully got stream');
-          break;
-        } catch (error) {
-          console.warn('⚠️ Constraint failed:', constraint, error);
-          lastError = error;
-          
-          // Special handling for "already in use" error
-          if (error.name === 'NotReadableError' || error.message.includes('already in use')) {
-            console.log('🧪 Device busy - offering test mode fallback');
-            const testStream = createTestVideoStream('Test User (Device Busy)', 120);
-            dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
-            dispatch({ type: 'SET_ERROR', payload: 'Camera busy. Using test mode. Try different browser or incognito mode for real camera, or add ?test=true to URL.' });
-            return testStream;
-          }
-          
-          mediaRetryCount.current++;
-          continue;
-        }
-      }
-      
-      if (!stream) {
-        // Final fallback to test mode
-        console.log('🧪 All constraints failed - using test mode');
-        const testStream = createTestVideoStream('Test User (Fallback)', 240);
-        dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
-        dispatch({ type: 'SET_ERROR', payload: 'Could not access camera. Using test mode for development. Add ?test=true to URL for intentional test mode.' });
-        return testStream;
-      }
-      
-      // Log what we got
-      const videoTracks = stream.getVideoTracks();
-      const audioTracks = stream.getAudioTracks();
-      console.log('📊 Real stream info:', {
-        video: videoTracks.length > 0 ? videoTracks[0].label : 'none',
-        audio: audioTracks.length > 0 ? audioTracks[0].label : 'none'
-      });
-      
-      dispatch({ type: 'SET_LOCAL_STREAM', payload: stream });
-      dispatch({ type: 'CLEAR_ERROR' });
-      mediaRetryCount.current = 0;
-      
-      return stream;
-      
-    } catch (error) {
-      console.error('❌ Error getting user media:', error);
-      
-      // Always fallback to test mode in development
-      if (process.env.NODE_ENV === 'development') {
-        console.log('🧪 Development fallback to test mode');
-        const testStream = createTestVideoStream('Test User (Error Fallback)', 300);
-        dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
-        dispatch({ type: 'SET_ERROR', payload: `Media error: ${error.message}. Using test mode. Add ?test=true to URL for intentional test mode.` });
-        return testStream;
-      }
-      
-      let errorMessage = 'Failed to access media devices';
-      
-      if (error.name === 'NotAllowedError') {
-        errorMessage = 'Permission denied. Please allow camera/microphone access and refresh.';
-      } else if (error.name === 'NotFoundError') {
-        errorMessage = 'No camera/microphone found. Please connect a device.';
-      } else if (error.name === 'NotReadableError' || error.message.includes('already in use')) {
-        errorMessage = 'Camera/microphone busy. Try: 1) Different browser 2) Incognito mode 3) Close other tabs using camera 4) Add ?test=true for test mode';
-      }
-      
-      dispatch({ type: 'SET_ERROR', payload: errorMessage });
-      throw error;
-    }
-  }, [checkMediaDevices, detectTestMode, createTestVideoStream]);
-
-  // Device switching capability
-  const switchCamera = useCallback(async (deviceId) => {
-    try {
-      if (state.isTestMode) {
-        console.log('🧪 Switching test camera');
-        const testStream = createTestVideoStream(`Camera ${deviceId.slice(-4)}`, Math.random() * 360);
-        
-        // Replace in peer connection if exists
-        if (peerServiceRef.current.peer && state.localStream) {
-          const videoTrack = testStream.getVideoTracks()[0];
-          const sender = peerServiceRef.current.peer.getSenders().find(s => 
-            s.track && s.track.kind === 'video'
+  const getUserMedia = useCallback(
+    async (forceRetry = false) => {
+      try {
+        console.log('📱 Getting user media...');
+        const isTestMode = detectTestMode();
+        if (isTestMode) {
+          console.log('🧪 Test mode enabled - using fake video stream');
+          const testStream = createTestVideoStream(
+            `User ${Math.floor(Math.random() * 100)}`,
+            Math.random() * 360
           );
-          
-          if (sender) {
-            await sender.replaceTrack(videoTrack);
+          dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
+          dispatch({ type: 'CLEAR_ERROR' });
+          return testStream;
+        }
+        if (!forceRetry && mediaRetryCount.current >= maxRetries) {
+          console.log('🧪 Max retries reached - using test mode');
+          const testStream = createTestVideoStream('Test User (Fallback)', 0);
+          dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
+          dispatch({
+            type: 'SET_ERROR',
+            payload:
+              'Max retries reached. Using test mode. Add ?test=true to URL for intentional test mode.',
+          });
+          return testStream;
+        }
+        if (forceRetry) {
+          mediaRetryCount.current = 0;
+        }
+        const { hasVideo, hasAudio } = await checkMediaDevices();
+        if (!hasVideo && !hasAudio) {
+          throw new Error('No media devices available');
+        }
+        const constraints = [];
+        if (hasVideo && hasAudio) {
+          constraints.push({ video: true, audio: true });
+        }
+        if (hasAudio) {
+          constraints.push({ audio: true });
+        }
+        if (hasVideo) {
+          constraints.push({ video: true });
+        }
+        let stream;
+        let lastError;
+        for (const constraint of constraints) {
+          try {
+            console.log('🎯 Trying constraint:', constraint);
+            stream = await navigator.mediaDevices.getUserMedia(constraint);
+            console.log('✅ Successfully got stream');
+            break;
+          } catch (error) {
+            console.warn('⚠️ Constraint failed:', constraint, error);
+            lastError = error;
+            if (
+              error.name === 'NotReadableError' ||
+              error.message.includes('already in use')
+            ) {
+              console.log('🧪 Device busy - offering test mode fallback');
+              const testStream = createTestVideoStream('Test User (Device Busy)', 120);
+              dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
+              dispatch({
+                type: 'SET_ERROR',
+                payload:
+                  'Camera busy. Using test mode. Try different browser or incognito mode for real camera, or add ?test=true to URL.',
+              });
+              return testStream;
+            }
+            mediaRetryCount.current++;
+            continue;
           }
         }
-        
-        // Stop old stream
-        if (state.localStream) {
-          state.localStream.getTracks().forEach(track => track.stop());
+        if (!stream) {
+          console.log('🧪 All constraints failed - using test mode');
+          const testStream = createTestVideoStream('Test User (Fallback)', 240);
+          dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
+          dispatch({
+            type: 'SET_ERROR',
+            payload:
+              'Could not access camera. Using test mode for development. Add ?test=true to URL for intentional test mode.',
+          });
+          return testStream;
         }
-        
-        dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
-        return;
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: deviceId } },
-        audio: true
-      });
-      
-      // Replace video track in peer connection
-      if (peerServiceRef.current.peer && state.localStream) {
-        const videoTrack = stream.getVideoTracks()[0];
-        const sender = peerServiceRef.current.peer.getSenders().find(s => 
-          s.track && s.track.kind === 'video'
-        );
-        
-        if (sender) {
-          await sender.replaceTrack(videoTrack);
+        const videoTracks = stream.getVideoTracks();
+        const audioTracks = stream.getAudioTracks();
+        console.log('📊 Real stream info:', {
+          video: videoTracks.length > 0 ? videoTracks[0].label : 'none',
+          audio: audioTracks.length > 0 ? audioTracks[0].label : 'none',
+        });
+        dispatch({ type: 'SET_LOCAL_STREAM', payload: stream });
+        dispatch({ type: 'CLEAR_ERROR' });
+        mediaRetryCount.current = 0;
+        return stream;
+      } catch (error) {
+        console.error('❌ Error getting user media:', error);
+        if (process.env.NODE_ENV === 'development') {
+          console.log('🧪 Development fallback to test mode');
+          const testStream = createTestVideoStream('Test User (Error Fallback)', 300);
+          dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
+          dispatch({
+            type: 'SET_ERROR',
+            payload: `Media error: ${error.message}. Using test mode. Add ?test=true to URL for intentional test mode.`,
+          });
+          return testStream;
         }
+        let errorMessage = 'Failed to access media devices';
+        if (error.name === 'NotAllowedError') {
+          errorMessage = 'Permission denied. Please allow camera/microphone access and refresh.';
+        } else if (error.name === 'NotFoundError') {
+          errorMessage = 'No camera/microphone found. Please connect a device.';
+        } else if (
+          error.name === 'NotReadableError' ||
+          error.message.includes('already in use')
+        ) {
+          errorMessage =
+            'Camera/microphone busy. Try: 1) Different browser 2) Incognito mode 3) Close other tabs using camera 4) Add ?test=true for test mode';
+        }
+        dispatch({ type: 'SET_ERROR', payload: errorMessage });
+        throw error;
       }
-      
-      // Stop old stream
-      if (state.localStream) {
-        state.localStream.getTracks().forEach(track => track.stop());
-      }
-      
-      dispatch({ type: 'SET_LOCAL_STREAM', payload: stream });
-      
-    } catch (error) {
-      console.error('❌ Failed to switch camera:', error);
-      dispatch({ type: 'SET_ERROR', payload: 'Failed to switch camera' });
-    }
-  }, [state.localStream, state.isTestMode, createTestVideoStream]);
-
-  // Toggle test mode manually
-  const toggleTestMode = useCallback(() => {
-    const newTestMode = !state.isTestMode;
-    dispatch({ type: 'SET_TEST_MODE', payload: newTestMode });
-    
-    if (newTestMode) {
-      // Switch to test mode
-      console.log('🧪 Switching to test mode');
-      const testStream = createTestVideoStream('Manual Test Mode', 180);
-      
-      // Stop current stream
-      if (state.localStream) {
-        state.localStream.getTracks().forEach(track => track.stop());
-      }
-      
-      dispatch({ type: 'SET_LOCAL_STREAM', payload: testStream });
-      dispatch({ type: 'CLEAR_ERROR' });
-    } else {
-      // Switch back to real camera
-      console.log('📱 Switching back to real camera');
-      cleanupTestStream();
-      getUserMedia(true);
-    }
-  }, [state.isTestMode, state.localStream, createTestVideoStream, cleanupTestStream, getUserMedia]);
+    },
+    [checkMediaDevices, detectTestMode, createTestVideoStream]
+  );
 
   // Setup remote stream handler
   const setupRemoteStreamHandler = useCallback((peer) => {
     peer.ontrack = (event) => {
       console.log('📥 Received remote track:', event.track.kind);
-      
       if (event.streams && event.streams.length > 0) {
         const remoteStream = event.streams[0];
-        console.log('✅ Remote stream received with tracks:', remoteStream.getTracks().map(t => t.kind));
+        console.log(
+          '✅ Remote stream received with tracks:',
+          remoteStream.getTracks().map((t) => t.kind)
+        );
         dispatch({ type: 'SET_REMOTE_STREAM', payload: remoteStream });
         dispatch({ type: 'SET_CALL_STATUS', payload: 'connected' });
       }
@@ -630,27 +596,29 @@ export const WebRTCProvider = ({ children }) => {
   }, []);
 
   // Setup ICE candidate handler
-  const setupIceCandidateHandler = useCallback((peer, targetSocketId) => {
-    peer.onicecandidate = (event) => {
-      if (event.candidate && socket) {
-        console.log('🧊 Sending ICE candidate to:', targetSocketId);
-        socket.emit('webrtc:ice-candidate', {
-          to: targetSocketId,
-          candidate: event.candidate
-        });
-      } else if (!event.candidate) {
-        console.log('🧊 ICE gathering complete');
-      }
-    };
-  }, [socket]);
+  const setupIceCandidateHandler = useCallback(
+    (peer, targetSocketId) => {
+      peer.onicecandidate = (event) => {
+        if (event.candidate && socket) {
+          console.log('🧊 Sending ICE candidate to:', targetSocketId);
+          socket.emit('webrtc:ice-candidate', {
+            to: targetSocketId,
+            candidate: event.candidate,
+          });
+        } else if (!event.candidate) {
+          console.log('🧊 ICE gathering complete');
+        }
+      };
+    },
+    [socket]
+  );
 
   // Setup connection state handler
   const setupConnectionStateHandler = useCallback((peer) => {
     peer.onconnectionstatechange = () => {
-      const state = peer.connectionState;
-      console.log('🔗 Connection state changed:', state);
-      
-      switch (state) {
+      const connectionState = peer.connectionState;
+      console.log('🔗 Connection state changed:', connectionState);
+      switch (connectionState) {
         case 'connected':
           dispatch({ type: 'SET_CALL_STATUS', payload: 'connected' });
           break;
@@ -665,34 +633,34 @@ export const WebRTCProvider = ({ children }) => {
           break;
       }
     };
-
     peer.oniceconnectionstatechange = () => {
       console.log('🧊 ICE connection state:', peer.iceConnectionState);
     };
   }, []);
 
-  // Enhanced handle user joined with better error handling
-  const handleUserJoined = useCallback(async ({ socketId, email, userId, user: joinedUser }) => {
+  // Handle user joined event
+ const handleUserJoined = useCallback(
+  async ({ socketId, email, userId, user: joinedUser }) => {
     console.log('👋 User joined - initiating call:', { socketId, email, userId });
     
     if (socketId === socket?.id) {
       console.log('🚫 Ignoring self join');
       return;
     }
-    
-    remoteSocketIdRef.current = socketId;
+
+    dispatch({ type: 'SET_REMOTE_SOCKET_ID', payload: socketId });
     dispatch({ type: 'SET_CALL_STATUS', payload: 'connecting' });
-    
+
     try {
-      // Create peer connection first
-      const peer = peerServiceRef.current.createPeerConnection();
+      // Small delay to ensure socket connection is stable
+      await new Promise(resolve => setTimeout(resolve, 500));
       
-      // Setup event handlers
+      const peer = peerServiceRef.current.createPeerConnection();
       setupRemoteStreamHandler(peer);
       setupIceCandidateHandler(peer, socketId);
       setupConnectionStateHandler(peer);
-      
-      // Try to get local stream
+
+      // Get local stream first
       let stream = state.localStream;
       if (!stream) {
         try {
@@ -700,47 +668,50 @@ export const WebRTCProvider = ({ children }) => {
           stream = await getUserMedia();
         } catch (mediaError) {
           console.warn('⚠️ Proceeding without local media:', mediaError);
-          // Continue with call even without local media - user can still receive
-          // Don't dispatch error here as it's already handled in getUserMedia
         }
       }
-      
-      // Add local stream if available
+
+      // Add stream to peer connection
       if (stream) {
-        peerServiceRef.current.addStream(stream);
+        const success = peerServiceRef.current.addLocalStream(stream);
+        if (!success) {
+          console.warn('⚠️ Failed to add local stream to peer connection');
+        }
       }
-      
+
       // Create and send offer
       const offer = await peerServiceRef.current.getOffer();
       console.log('📞 Calling user:', socketId);
+      
       socket.emit('user:call', { to: socketId, offer });
       
     } catch (error) {
       console.error('❌ Error in handleUserJoined:', error);
-      if (!error.message.includes('already in use') && !error.message.includes('denied')) {
-        dispatch({ type: 'SET_ERROR', payload: `Failed to initiate call: ${error.message}` });
-      }
+      dispatch({
+        type: 'SET_ERROR',
+        payload: `Failed to initiate call: ${error.message}`,
+      });
       dispatch({ type: 'SET_CALL_STATUS', payload: 'idle' });
     }
-  }, [socket, state.localStream, getUserMedia, setupRemoteStreamHandler, setupIceCandidateHandler, setupConnectionStateHandler]);
+  },
+  [socket, state.localStream, getUserMedia, setupRemoteStreamHandler, setupIceCandidateHandler, setupConnectionStateHandler]
+);
 
-  // Enhanced handle incoming call
-  const handleIncomingCall = useCallback(async ({ from, offer, caller }) => {
+// Handle incoming call with better error handling
+const handleIncomingCall = useCallback(
+  async ({ from, offer, caller }) => {
     console.log('📞 Incoming call from:', from, caller);
     
-    remoteSocketIdRef.current = from;
+    dispatch({ type: 'SET_REMOTE_SOCKET_ID', payload: from });
     dispatch({ type: 'SET_CALL_STATUS', payload: 'connecting' });
-    
+
     try {
-      // Create peer connection first
       const peer = peerServiceRef.current.createPeerConnection();
-      
-      // Setup event handlers
       setupRemoteStreamHandler(peer);
       setupIceCandidateHandler(peer, from);
       setupConnectionStateHandler(peer);
-      
-      // Try to get local stream
+
+      // Get local stream
       let stream = state.localStream;
       if (!stream) {
         try {
@@ -748,30 +719,36 @@ export const WebRTCProvider = ({ children }) => {
           stream = await getUserMedia();
         } catch (mediaError) {
           console.warn('⚠️ Proceeding without local media:', mediaError);
-          // Continue with call even without local media - user can still receive
         }
       }
-      
-      // Add local stream if available
+
+      // Add stream to peer connection
       if (stream) {
-        peerServiceRef.current.addStream(stream);
+        const success = peerServiceRef.current.addLocalStream(stream);
+        if (!success) {
+          console.warn('⚠️ Failed to add local stream to peer connection');
+        }
       }
-      
+
       // Create and send answer
       const answer = await peerServiceRef.current.getAnswer(offer);
       console.log('✅ Answering call from:', from);
+      
       socket.emit('call:accepted', { to: from, answer });
       
     } catch (error) {
       console.error('❌ Error handling incoming call:', error);
-      if (!error.message.includes('already in use') && !error.message.includes('denied')) {
-        dispatch({ type: 'SET_ERROR', payload: `Failed to answer call: ${error.message}` });
-      }
+      dispatch({
+        type: 'SET_ERROR',
+        payload: `Failed to answer call: ${error.message}`,
+      });
       dispatch({ type: 'SET_CALL_STATUS', payload: 'idle' });
     }
-  }, [socket, state.localStream, getUserMedia, setupRemoteStreamHandler, setupIceCandidateHandler, setupConnectionStateHandler]);
+  },
+  [socket, state.localStream, getUserMedia, setupRemoteStreamHandler, setupIceCandidateHandler, setupConnectionStateHandler]
+);
 
-  // Handle call accepted
+  // Handle call accepted event
   const handleCallAccepted = useCallback(async ({ answer, from, accepter }) => {
     console.log('✅ Call accepted by:', from, accepter);
     try {
@@ -783,69 +760,58 @@ export const WebRTCProvider = ({ children }) => {
     }
   }, []);
 
-  // Handle ICE candidate
+  // Handle ICE candidate event from socket
   const handleIceCandidate = useCallback(async ({ candidate, from }) => {
     console.log('🧊 Received ICE candidate from:', from);
-    const peer = peerServiceRef.current.peer;
-    
-    if (peer && peer.remoteDescription && candidate) {
-      try {
-        await peer.addIceCandidate(new RTCIceCandidate(candidate));
-        console.log('✅ ICE candidate added successfully');
-      } catch (error) {
-        console.error('❌ ICE candidate error:', error);
-        // Don't throw - ICE failures are often recoverable
-      }
-    } else {
-      console.warn('⚠️ Peer not ready for ICE candidate or no candidate provided');
+    try {
+      await peerServiceRef.current.addIceCandidate(candidate);
+    } catch (error) {
+      console.error('❌ ICE candidate error:', error);
     }
   }, []);
 
-  // Handle user left
-  const handleUserLeft = useCallback(({ socketId, email, userId }) => {
-    console.log('👋 User left:', { socketId, email, userId });
-    if (socketId === remoteSocketIdRef.current) {
-      console.log('🔌 Remote user left - cleaning up connection');
-      peerServiceRef.current.close();
-      dispatch({ type: 'SET_REMOTE_STREAM', payload: null });
-      dispatch({ type: 'SET_CALL_STATUS', payload: 'idle' });
-      remoteSocketIdRef.current = null;
-    }
-  }, []);
+  // Handle user left event
+  const handleUserLeft = useCallback(
+    ({ socketId, email, userId }) => {
+      console.log('👋 User left:', { socketId, email, userId });
+      if (socketId === state.remoteSocketId) {
+        console.log('🔌 Remote user left - cleaning up connection');
+        peerServiceRef.current.close();
+        dispatch({ type: 'SET_REMOTE_STREAM', payload: null });
+        dispatch({ type: 'SET_CALL_STATUS', payload: 'idle' });
+        dispatch({ type: 'SET_REMOTE_SOCKET_ID', payload: null });
+      }
+    },
+    [state.remoteSocketId]
+  );
 
   // End call
   const endCall = useCallback(() => {
     console.log('📞 Ending call');
     peerServiceRef.current.close();
-    
-    // Stop local stream tracks
     const currentLocalStream = state.localStream;
     if (currentLocalStream) {
-      currentLocalStream.getTracks().forEach(track => {
+      currentLocalStream.getTracks().forEach((track) => {
         track.stop();
         console.log('🛑 Stopped track:', track.kind);
       });
     }
-    
     cleanupTestStream();
     dispatch({ type: 'RESET' });
-    remoteSocketIdRef.current = null;
     mediaRetryCount.current = 0;
   }, [state.localStream, cleanupTestStream]);
 
-  // Enhanced toggle video with better error handling
+  // Toggle video
   const toggleVideo = useCallback(() => {
     if (!state.localStream) {
       dispatch({ type: 'SET_ERROR', payload: 'No local stream available' });
       return false;
     }
-    
     const videoTracks = state.localStream.getVideoTracks();
     if (videoTracks.length === 0) {
       dispatch({ type: 'SET_ERROR', payload: 'No video device available' });
       return false;
     }
-    
     const enabled = !videoTracks[0].enabled;
     videoTracks[0].enabled = enabled;
     console.log('📹 Video toggled:', enabled ? 'ON' : 'OFF');
@@ -853,25 +819,24 @@ export const WebRTCProvider = ({ children }) => {
     return enabled;
   }, [state.localStream]);
 
-  // Enhanced toggle audio with better error handling
+  // Toggle audio
   const toggleAudio = useCallback(() => {
     if (!state.localStream) {
       dispatch({ type: 'SET_ERROR', payload: 'No local stream available' });
       return false;
     }
-    
     const audioTracks = state.localStream.getAudioTracks();
     if (audioTracks.length === 0) {
       dispatch({ type: 'SET_ERROR', payload: 'No audio device available' });
       return false;
     }
-    
     const enabled = !audioTracks[0].enabled;
     audioTracks[0].enabled = enabled;
     console.log('🎤 Audio toggled:', enabled ? 'ON' : 'OFF');
     dispatch({ type: 'CLEAR_ERROR' });
     return enabled;
   }, [state.localStream]);
+
   // Retry media access
   const retryMediaAccess = useCallback(async () => {
     try {
@@ -880,7 +845,6 @@ export const WebRTCProvider = ({ children }) => {
       await getUserMedia(true);
     } catch (error) {
       console.error('❌ Retry failed:', error);
-      // Error is already handled in getUserMedia
     }
   }, [getUserMedia]);
 
@@ -889,32 +853,22 @@ export const WebRTCProvider = ({ children }) => {
     dispatch({ type: 'CLEAR_ERROR' });
   }, []);
 
-  // Check media devices on mount
-  useEffect(() => {
-    checkMediaDevices();
-  }, [checkMediaDevices]);
-
   // Socket event listeners
   useEffect(() => {
     if (!socket || !isConnected || isInitializedRef.current) return;
-
     console.log('🎧 Setting up WebRTC socket listeners');
     isInitializedRef.current = true;
-
     const listeners = {
       'user:joined': handleUserJoined,
       'incoming:call': handleIncomingCall,
       'call:accepted': handleCallAccepted,
       'webrtc:ice-candidate': handleIceCandidate,
-      'user:left': handleUserLeft
+      'user:left': handleUserLeft,
     };
-
-    // Set up listeners
     Object.entries(listeners).forEach(([event, handler]) => {
       socket.on(event, handler);
       console.log(`📡 Registered listener for: ${event}`);
     });
-
     return () => {
       console.log('🔇 Cleaning up WebRTC socket listeners');
       Object.entries(listeners).forEach(([event, handler]) => {
@@ -922,7 +876,15 @@ export const WebRTCProvider = ({ children }) => {
       });
       isInitializedRef.current = false;
     };
-  }, [socket, isConnected, handleUserJoined, handleIncomingCall, handleCallAccepted, handleIceCandidate, handleUserLeft]);
+  }, [
+    socket,
+    isConnected,
+    handleUserJoined,
+    handleIncomingCall,
+    handleCallAccepted,
+    handleIceCandidate,
+    handleUserLeft,
+  ]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -930,44 +892,48 @@ export const WebRTCProvider = ({ children }) => {
       console.log('🧹 WebRTC Provider unmounting - cleaning up');
       const currentLocalStream = state.localStream;
       if (currentLocalStream) {
-        currentLocalStream.getTracks().forEach(track => {
+        currentLocalStream.getTracks().forEach((track) => {
           track.stop();
           console.log('🛑 Cleanup: Stopped track:', track.kind);
         });
       }
       peerServiceRef.current?.close();
     };
-  }, []);
+  }, [state.localStream]);
 
   // Memoize context value
-  const contextValue = React.useMemo(() => ({
-    localStream: state.localStream,
-    remoteStream: state.remoteStream,
-    callStatus: state.callStatus,
-    error: state.error,
-    deviceStatus: state.deviceStatus,
-    remoteSocketId: remoteSocketIdRef.current,
-    getUserMedia,
-    endCall,
-    toggleVideo,
-    toggleAudio,
-    clearError,
-    retryMediaAccess,
-    checkMediaDevices,
-  }), [
-    state.localStream,
-    state.remoteStream,
-    state.callStatus,
-    state.error,
-    state.deviceStatus,
-    getUserMedia,
-    endCall,
-    toggleVideo,
-    toggleAudio,
-    clearError,
-    retryMediaAccess,
-    checkMediaDevices
-  ]);
+  const contextValue = React.useMemo(
+    () => ({
+      localStream: state.localStream,
+      remoteStream: state.remoteStream,
+      callStatus: state.callStatus,
+      error: state.error,
+      deviceStatus: state.deviceStatus,
+      remoteSocketId: state.remoteSocketId,
+      getUserMedia,
+      endCall,
+      toggleVideo,
+      toggleAudio,
+      clearError,
+      retryMediaAccess,
+      checkMediaDevices,
+    }),
+    [
+      state.localStream,
+      state.remoteStream,
+      state.callStatus,
+      state.error,
+      state.deviceStatus,
+      state.remoteSocketId,
+      getUserMedia,
+      endCall,
+      toggleVideo,
+      toggleAudio,
+      clearError,
+      retryMediaAccess,
+      checkMediaDevices,
+    ]
+  );
 
   return (
     <WebRTCContext.Provider value={contextValue}>
@@ -975,3 +941,5 @@ export const WebRTCProvider = ({ children }) => {
     </WebRTCContext.Provider>
   );
 };
+
+export default WebRTCProvider;

@@ -1,4 +1,3 @@
-// src/components/CodeEditor.jsx - Enhanced with Shared Compilation and Input
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useCodeEditor } from '../context/CodeEditorContext';
 import { useAuth } from '../context/auth/AuthContext';
@@ -12,7 +11,12 @@ import {
   UserGroupIcon,
   EyeIcon,
   CodeBracketIcon,
-  CommandLineIcon
+  CommandLineIcon,
+  DocumentTextIcon,
+  SparklesIcon,
+  TrashIcon,
+  ChevronDownIcon,
+  ChevronUpIcon
 } from '@heroicons/react/24/outline';
 
 // Enhanced Remote Cursor component with proper positioning
@@ -57,6 +61,7 @@ const RemoteCursor = ({ cursor, color, textareaRef }) => {
   }, [position, textareaRef]);
 
   if (!position) return null;
+  
 
   return (
     <div
@@ -95,7 +100,7 @@ const RemoteCursor = ({ cursor, color, textareaRef }) => {
 };
 
 // Language selector component
-const LanguageSelector = ({ language, onLanguageChange }) => {
+const LanguageSelector = ({ language, onLanguageChange, disabled = false }) => {
   const supportedLanguages = [
     { key: 'cpp', name: 'C++', icon: '🔧' },
     { key: 'c', name: 'C', icon: '⚙️' },
@@ -117,7 +122,10 @@ const LanguageSelector = ({ language, onLanguageChange }) => {
     <select
       value={language}
       onChange={(e) => onLanguageChange(e.target.value)}
-      className="bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+      disabled={disabled}
+      className={`bg-gray-700 text-white px-3 py-2 rounded border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm ${
+        disabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-600'
+      }`}
     >
       {supportedLanguages.map((lang) => (
         <option key={lang.key} value={lang.key}>
@@ -319,6 +327,11 @@ const SharedInputSection = ({ programInput, onInputChange, inputUpdatedBy, curre
               • Updated by {inputUpdatedBy.username || inputUpdatedBy.email?.split('@')[0]}
             </span>
           )}
+          {isExpanded ? (
+            <ChevronUpIcon className="h-4 w-4" />
+          ) : (
+            <ChevronDownIcon className="h-4 w-4" />
+          )}
         </button>
         
         <div className="flex items-center space-x-2">
@@ -356,6 +369,24 @@ const SharedInputSection = ({ programInput, onInputChange, inputUpdatedBy, curre
   );
 };
 
+// Code Statistics Component
+const CodeStats = ({ code, language, cursorPosition }) => {
+  const lines = code.split('\n').length;
+  const characters = code.length;
+  const words = code.trim() ? code.trim().split(/\s+/).length : 0;
+
+  return (
+    <div className="flex items-center space-x-4 text-xs text-gray-400">
+      <span>Lines: {lines}</span>
+      <span>Characters: {characters}</span>
+      <span>Words: {words}</span>
+      <span>Language: {language.toUpperCase()}</span>
+      <span>Position: {cursorPosition.line + 1}:{cursorPosition.ch + 1}</span>
+    </div>
+  );
+};
+
+// Main CodeEditor Component
 const CodeEditor = ({ roomId }) => {
   const { user } = useAuth();
   const {
@@ -378,12 +409,14 @@ const CodeEditor = ({ roomId }) => {
     insertTemplate,
     downloadCode,
     clearCompilationResults,
-    getSupportedLanguages
+    getSupportedLanguages,
+    resetEditor
   } = useCodeEditor();
 
   const textareaRef = useRef(null);
   const [localCode, setLocalCode] = useState(code || '');
   const [cursorPosition, setCursorPosition] = useState({ line: 0, ch: 0 });
+  const [isResultsExpanded, setIsResultsExpanded] = useState(true);
   const updateTimeoutRef = useRef(null);
   const cursorUpdateTimeoutRef = useRef(null);
 
@@ -416,6 +449,7 @@ const CodeEditor = ({ roomId }) => {
   // Update local code when room code changes (from other users)
   useEffect(() => {
     if (code !== localCode && lastUpdatedBy?._id !== user?._id) {
+      console.log('🔄 Updating local code from remote change');
       setLocalCode(code);
     }
   }, [code, localCode, lastUpdatedBy, user?._id]);
@@ -471,21 +505,158 @@ const CodeEditor = ({ roomId }) => {
     }, 100);
   }, [calculateCursorPosition, updateCursor]);
 
-  // Handle language change
+  // Handle language change with template insertion
   const handleLanguageChange = useCallback((newLanguage) => {
+    console.log('🔄 Changing language to:', newLanguage);
     changeLanguage(newLanguage);
   }, [changeLanguage]);
 
-  // Handle template insertion
-  const handleInsertTemplate = useCallback(() => {
-    insertTemplate(language);
-  }, [insertTemplate, language]);
+  // Handle template insertion - FIXED
+  // Handle template insertion - FIXED
+const handleInsertTemplate = useCallback(() => {
+  console.log('📋 Inserting template for language:', language);
+  const codeTemplates = {
+  cpp: `#include <iostream>
+using namespace std;
 
+int main() {
+    cout << "Hello, World!" << endl;
+    return 0;
+}`,
+  c: `#include <stdio.h>
+
+int main() {
+    printf("Hello, World!\\n");
+    return 0;
+}`,
+  java: `public class Main {
+    public static void main(String[] args) {
+        System.out.println("Hello, World!");
+    }
+}`,
+  python: `# Python program
+print("Hello, World!")
+
+# You can add input like this:
+# name = input("Enter your name: ")
+# print(f"Hello, {name}!")`,
+  javascript: `// JavaScript program
+console.log("Hello, World!");
+
+// You can read input in Node.js like this:
+// const readline = require('readline');
+// const rl = readline.createInterface({
+//     input: process.stdin,
+//     output: process.stdout
+// });`,
+  typescript: `// TypeScript program
+const message: string = "Hello, World!";
+console.log(message);
+
+// Example with types
+interface Person {
+    name: string;
+    age: number;
+}
+
+const person: Person = {
+    name: "Alice",
+    age: 30
+};
+
+console.log(\`Hello, \${person.name}!\`);`,
+  csharp: `using System;
+
+class Program {
+    static void Main() {
+        Console.WriteLine("Hello, World!");
+        
+        // Example with input
+        // Console.Write("Enter your name: ");
+        // string name = Console.ReadLine();
+        // Console.WriteLine($"Hello, {name}!");
+    }
+}`,
+  go: `package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello, World!")
+    
+    // Example with input
+    // var name string
+    // fmt.Print("Enter your name: ")
+    // fmt.Scanln(&name)
+    // fmt.Printf("Hello, %s!\\n", name)
+}`,
+  rust: `fn main() {
+    println!("Hello, World!");
+    
+    // Example with input
+    // use std::io;
+    // let mut input = String::new();
+    // println!("Enter your name:");
+    // io::stdin().read_line(&mut input).expect("Failed to read line");
+    // println!("Hello, {}!", input.trim());
+}`,
+  php: `<?php
+echo "Hello, World!\\n";
+
+// Example with input
+// echo "Enter your name: ";
+// $name = trim(fgets(STDIN));
+// echo "Hello, $name!\\n";
+?>`,
+  ruby: `# Ruby program
+puts "Hello, World!"
+
+# Example with input
+# print "Enter your name: "
+# name = gets.chomp
+# puts "Hello, #{name}!"`,
+  swift: `import Foundation
+
+print("Hello, World!")
+
+// Example with input
+// print("Enter your name: ", terminator: "")
+// if let name = readLine() {
+//     print("Hello, \\(name)!")
+// }`,
+  kotlin: `fun main() {
+    println("Hello, World!")
+    
+    // Example with input
+    // print("Enter your name: ")
+    // val name = readLine()
+    // println("Hello, $name!")
+}`,
+  scala: `object Main extends App {
+    println("Hello, World!")
+    
+    // Example with input
+    // print("Enter your name: ")
+    // val name = scala.io.StdIn.readLine()
+    // println(s"Hello, $name!")
+}`
+};
+  // Force update the local code state immediately
+  const template = codeTemplates[language] || codeTemplates.cpp;
+  setLocalCode(template);
+  
+  // Then call the context function
+  insertTemplate(language);
+}, [insertTemplate, language]);
   // Handle compilation (shared with all users)
   const handleCompile = useCallback(async () => {
     if (!localCode.trim()) {
       return;
     }
+    
+    // Expand results section when compilation starts
+    setIsResultsExpanded(true);
+    
     await compileAndExecute();
   }, [localCode, compileAndExecute]);
 
@@ -493,6 +664,18 @@ const CodeEditor = ({ roomId }) => {
   const handleInputChange = useCallback((e) => {
     updateInput(e.target.value);
   }, [updateInput]);
+
+  // Handle clear results
+  const handleClearResults = useCallback(() => {
+    clearCompilationResults();
+  }, [clearCompilationResults]);
+
+  // Handle reset editor
+  const handleResetEditor = useCallback(() => {
+    if (window.confirm('Are you sure you want to reset the editor? This will clear all code and results for everyone in the room.')) {
+      resetEditor();
+    }
+  }, [resetEditor]);
 
   // Handle keyboard shortcuts
   const handleKeyDown = useCallback((e) => {
@@ -502,6 +685,12 @@ const CodeEditor = ({ roomId }) => {
       handleCompile();
     }
     
+    // Ctrl/Cmd + S to download
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      downloadCode();
+    }
+    
     // Tab key handling for proper indentation
     if (e.key === 'Tab') {
       e.preventDefault();
@@ -509,17 +698,27 @@ const CodeEditor = ({ roomId }) => {
       const start = textarea.selectionStart;
       const end = textarea.selectionEnd;
       
-      // Insert tab character
+      // Insert tab character (4 spaces)
       const newValue = localCode.substring(0, start) + '    ' + localCode.substring(end);
       setLocalCode(newValue);
+      
+      // Update the textarea value immediately
+      textarea.value = newValue;
       
       // Update cursor position
       setTimeout(() => {
         textarea.selectionStart = textarea.selectionEnd = start + 4;
         handleCursorChange();
+        // Trigger the debounced update
+        if (updateTimeoutRef.current) {
+          clearTimeout(updateTimeoutRef.current);
+        }
+        updateTimeoutRef.current = setTimeout(() => {
+          updateCode(newValue, language);
+        }, 300);
       }, 0);
     }
-  }, [handleCompile, localCode, handleCursorChange]);
+  }, [handleCompile, downloadCode, localCode, handleCursorChange, updateCode, language]);
 
   // Cleanup timeouts on unmount
   useEffect(() => {
@@ -533,140 +732,173 @@ const CodeEditor = ({ roomId }) => {
     };
   }, []);
 
+  // Auto-expand results when compilation starts or completes
+  useEffect(() => {
+    if (isCompiling || compilationResult || compilationError) {
+      setIsResultsExpanded(true);
+    }
+  }, [isCompiling, compilationResult, compilationError]);
+
   // Filter remote cursors to exclude current user
   const filteredRemoteCursors = Object.fromEntries(
     Object.entries(remoteCursors).filter(([userId]) => userId !== user?._id)
   );
 
-  return (
-    <div className="h-full flex flex-col bg-gray-900">
-      {/* Header */}
-      <div className="bg-gray-800 px-4 py-3 border-b border-gray-700">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <h3 className="text-lg font-medium text-white flex items-center space-x-2">
-              <CodeBracketIcon className="h-5 w-5" />
-              <span>Collaborative Code Editor</span>
-            </h3>
-            <ActiveUsers 
-              remoteCursors={filteredRemoteCursors} 
-              getUserColor={getUserColor}
-              compilationStartedBy={compilationStartedBy}
-              isCompiling={isCompiling}
-            />
-          </div>
-          
-          <div className="flex items-center space-x-2">
-            <LanguageSelector
-              language={language}
-              onLanguageChange={handleLanguageChange}
-            />
-            
-            <button
-              onClick={handleInsertTemplate}
-              className="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors text-sm"
-              title="Insert code template"
-            >
-              Template
-            </button>
-            
-            <button
-              onClick={downloadCode}
-              className="p-2 text-gray-400 hover:text-white transition-colors"
-              title="Download code file"
-            >
-              <DocumentArrowDownIcon className="h-5 w-5" />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Shared Program Input Section */}
-      <SharedInputSection
-        programInput={programInput}
-        onInputChange={handleInputChange}
-        inputUpdatedBy={inputUpdatedBy}
-        currentUser={user}
-      />
-
-      {/* Code Editor */}
-      <div className="flex-1 flex flex-col">
-        <div className="flex-1 relative overflow-hidden">
-          {/* Remote cursors container */}
-          <div className="absolute inset-0 pointer-events-none z-10">
-            {Object.entries(filteredRemoteCursors).map(([userId, cursor]) => (
-              <RemoteCursor
-                key={userId}
-                cursor={cursor}
-                color={getUserColor(userId)}
-                textareaRef={textareaRef}
-              />
-            ))}
-          </div>
-          
-          {/* Code textarea */}
-          <textarea
-            ref={textareaRef}
-            value={localCode}
-            onChange={handleCodeChange}
-            onSelect={handleCursorChange}
-            onKeyUp={handleCursorChange}
-            onKeyDown={handleKeyDown}
-            onClick={handleCursorChange}
-            className="w-full h-full bg-gray-900 text-white p-4 font-mono text-sm resize-none focus:outline-none border-none"
-            placeholder={`Write your ${language.toUpperCase()} code here...\n\nTips:\n- Use Ctrl+Enter (Cmd+Enter on Mac) to compile and run\n- Use Tab for indentation\n- See other users' cursors in real-time\n- Compilation results are shared with all participants`}
-            spellCheck={false}
-            style={{ 
-              minHeight: '400px',
-              lineHeight: '1.5',
-              fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace'
-            }}
+ return (
+  <div className="h-full flex flex-col bg-gray-900">
+    {/* Header */}
+    <div className="bg-gray-800 px-4 py-3 border-b border-gray-700">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center space-x-4">
+          <h3 className="text-lg font-medium text-white flex items-center space-x-2">
+            <CodeBracketIcon className="h-5 w-5" />
+            <span>Collaborative Code Editor</span>
+          </h3>
+          <ActiveUsers 
+            remoteCursors={filteredRemoteCursors} 
+            getUserColor={getUserColor}
+            compilationStartedBy={compilationStartedBy}
+            isCompiling={isCompiling}
           />
         </div>
         
-        {/* Compile Button */}
-        <div className="bg-gray-800 px-4 py-3 border-b border-gray-700">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <button
-                onClick={handleCompile}
-                disabled={isCompiling || !localCode.trim()}
-                className="flex items-center px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
-              >
-                {isCompiling ? (
-                  <ArrowPathIcon className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <PlayIcon className="h-4 w-4 mr-2" />
-                )}
-                {isCompiling ? 'Executing...' : 'Compile & Run (Shared)'}
-              </button>
-              
-              {(compilationResult || compilationError) && (
-                <button
-                  onClick={clearCompilationResults}
-                  className="px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition-colors text-sm"
-                >
-                  Clear Results
-                </button>
-              )}
-            </div>
-            
-            <div className="flex items-center space-x-4 text-xs text-gray-400">
-              <span>Language: {language.toUpperCase()}</span>
-              <span>Position: {cursorPosition.line + 1}:{cursorPosition.ch + 1}</span>
-              <span>Ctrl+Enter to run</span>
-            </div>
-          </div>
-        </div>
+        <div className="flex items-center space-x-2">
+          <LanguageSelector
+            language={language}
+            onLanguageChange={handleLanguageChange}
+            disabled={isCompiling}
+          />
+          
+          <button
+            onClick={handleInsertTemplate}
+            disabled={isCompiling}
+            className="flex items-center px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors text-sm"
+            title="Insert code template for current language"
+          >
+            <SparklesIcon className="h-4 w-4 mr-1" />
+            Template
+          </button>
+          
+          <button
+            onClick={downloadCode}
+            className="p-2 text-gray-400 hover:text-white transition-colors"
+            title="Download code file"
+          >
+            <DocumentArrowDownIcon className="h-5 w-5" />
+          </button>
 
-        {/* Shared Compilation Results */}
+          <button
+            onClick={handleResetEditor}
+            disabled={isCompiling}
+            className="p-2 text-gray-400 hover:text-red-400 disabled:cursor-not-allowed transition-colors"
+            title="Reset editor (clears everything for all users)"
+          >
+            <TrashIcon className="h-5 w-5" />
+          </button>
+        </div>
+      </div>
+    </div>
+
+    {/* Shared Program Input Section */}
+    <SharedInputSection
+      programInput={programInput}
+      onInputChange={handleInputChange}
+      inputUpdatedBy={inputUpdatedBy}
+      currentUser={user}
+    />
+
+    {/* Code Editor */}
+    <div className="flex-1 flex flex-col">
+      <div className="flex-1 relative overflow-hidden">
+        {/* Remote cursors container */}
+        <div className="absolute inset-0 pointer-events-none z-10">
+          {Object.entries(filteredRemoteCursors).map(([userId, cursor]) => (
+            <RemoteCursor
+              key={userId}
+              cursor={cursor}
+              color={getUserColor(userId)}
+              textareaRef={textareaRef}
+            />
+          ))}
+        </div>
+        
+        {/* Code textarea */}
+        <textarea
+          ref={textareaRef}
+          value={localCode}
+          onChange={handleCodeChange}
+          onSelect={handleCursorChange}
+          onKeyUp={handleCursorChange}
+          onKeyDown={handleKeyDown}
+          onClick={handleCursorChange}
+          className="w-full h-full bg-gray-900 text-white p-4 font-mono text-sm resize-none focus:outline-none border-none"
+          placeholder={`Write your ${language.toUpperCase()} code here...\n\nKeyboard Shortcuts:\n• Ctrl+Enter (Cmd+Enter on Mac) - Compile and run\n• Ctrl+S (Cmd+S on Mac) - Download code\n• Tab - Insert 4 spaces\n\nFeatures:\n• Real-time collaboration with cursor tracking\n• Shared compilation results\n• Template insertion for quick start`}
+          spellCheck={false}
+          style={{ 
+            minHeight: '400px',
+            lineHeight: '1.5',
+            fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace'
+          }}
+        />
+      </div>
+      
+      {/* Control Panel */}
+      <div className="bg-gray-800 px-4 py-3 border-b border-gray-700">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={handleCompile}
+              disabled={isCompiling || !localCode.trim()}
+              className="flex items-center px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
+            >
+              {isCompiling ? (
+                <ArrowPathIcon className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <PlayIcon className="h-4 w-4 mr-2" />
+              )}
+              {isCompiling ? 'Executing...' : 'Compile & Run'}
+            </button>
+            
+            {(compilationResult || compilationError) && (
+              <button
+                onClick={handleClearResults}
+                className="px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition-colors text-sm"
+              >
+                Clear Results
+              </button>
+            )}
+
+            <button
+              onClick={() => setIsResultsExpanded(!isResultsExpanded)}
+              className="flex items-center px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition-colors text-sm"
+            >
+              {isResultsExpanded ? (
+                <ChevronUpIcon className="h-4 w-4 mr-1" />
+              ) : (
+                <ChevronDownIcon className="h-4 w-4 mr-1" />
+              )}
+              {isResultsExpanded ? 'Hide' : 'Show'} Results
+            </button>
+          </div>
+          
+          <CodeStats 
+            code={localCode}
+            language={language}
+            cursorPosition={cursorPosition}
+          />
+        </div>
+      </div>
+
+      {/* Shared Compilation Results */}
+      {isResultsExpanded && (
         <div className="bg-gray-800 p-4 max-h-80 overflow-y-auto border-t border-gray-700">
           <div className="flex items-center justify-between mb-3">
             <h4 className="text-sm font-medium text-gray-300 flex items-center space-x-2">
+              <DocumentTextIcon className="h-4 w-4" />
               <span>Shared Execution Results</span>
               {(lastCompiledBy || compilationStartedBy) && (
                 <span className="text-xs text-blue-400">
-                  • All participants see the same results
+                  • Visible to all participants
                 </span>
               )}
             </h4>
@@ -695,9 +927,9 @@ const CodeEditor = ({ roomId }) => {
             </div>
           )}
         </div>
-      </div>
+      )}
     </div>
-  );
-};
-
+  </div>
+);
+}
 export default CodeEditor;

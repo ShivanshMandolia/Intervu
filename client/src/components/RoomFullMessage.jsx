@@ -19,7 +19,7 @@ const RoomFullMessage = () => {
 
   const handleCreateNewRoom = () => {
     clearError();
-    navigate('/');
+    navigate('/dashboard');
     // You can add additional logic here to open the create room modal
     // or navigate to a dedicated create room page
   };

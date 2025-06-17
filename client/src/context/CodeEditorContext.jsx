@@ -162,13 +162,37 @@ const codeEditorReducer = (state, action) => {
         code: action.payload.code,
         language: action.payload.language || state.language,
         lastUpdatedBy: action.payload.updatedBy,
-        lastUpdated: new Date()
+        lastUpdated: new Date(),
+        // Clear compilation results when code changes significantly
+        ...(action.payload.clearResults && {
+          compilationResult: null,
+          compilationError: null,
+          isCompiling: false
+        })
       };
     
     case 'SET_LANGUAGE':
       return {
         ...state,
-        language: action.payload
+        language: action.payload,
+        // Clear compilation results when language changes
+        compilationResult: null,
+        compilationError: null,
+        isCompiling: false
+      };
+    
+    case 'INSERT_TEMPLATE':
+      const template = codeTemplates[action.payload.language] || codeTemplates.cpp;
+      return {
+        ...state,
+        code: template,
+        language: action.payload.language,
+        lastUpdatedBy: action.payload.updatedBy,
+        lastUpdated: new Date(),
+        // Clear compilation results when template is inserted
+        compilationResult: null,
+        compilationError: null,
+        isCompiling: false
       };
     
     case 'UPDATE_CURSOR':
@@ -402,6 +426,21 @@ export const CodeEditorProvider = ({ children }) => {
       }
     };
 
+    const handleTemplateInsert = (data) => {
+      console.log('📋 Template insert received:', {
+        language: data.language,
+        updatedBy: data.updatedBy
+      });
+      
+      dispatch({
+        type: 'INSERT_TEMPLATE',
+        payload: {
+          language: data.language,
+          updatedBy: data.updatedBy
+        }
+      });
+    };
+
     const handleCursorUpdate = (data) => {
       if (data.user._id === user?._id) return;
       
@@ -422,7 +461,6 @@ export const CodeEditorProvider = ({ children }) => {
       });
     };
 
-    // NEW: Handle shared input updates
     const handleInputUpdate = (data) => {
       console.log('📥 Input update received:', {
         inputLength: data.input?.length,
@@ -438,7 +476,6 @@ export const CodeEditorProvider = ({ children }) => {
       });
     };
 
-    // NEW: Handle compilation start
     const handleCompilationStart = (data) => {
       console.log('🚀 Compilation started by:', data.startedBy);
       
@@ -451,7 +488,6 @@ export const CodeEditorProvider = ({ children }) => {
       });
     };
 
-    // NEW: Handle compilation results
     const handleCompilationResult = (data) => {
       console.log('🏁 Compilation result received:', {
         success: !data.error,
@@ -488,15 +524,17 @@ export const CodeEditorProvider = ({ children }) => {
 
     // Register socket events
     socket.on('code:update', handleCodeUpdate);
+    socket.on('template:insert', handleTemplateInsert);
     socket.on('code:cursor', handleCursorUpdate);
-    socket.on('input:update', handleInputUpdate); // NEW
-    socket.on('compilation:start', handleCompilationStart); // NEW
-    socket.on('compilation:result', handleCompilationResult); // NEW
+    socket.on('input:update', handleInputUpdate);
+    socket.on('compilation:start', handleCompilationStart);
+    socket.on('compilation:result', handleCompilationResult);
     socket.on('user:left', handleUserDisconnected);
     socket.on('room:joined', handleRoomJoined);
 
     return () => {
       socket.off('code:update', handleCodeUpdate);
+      socket.off('template:insert', handleTemplateInsert);
       socket.off('code:cursor', handleCursorUpdate);
       socket.off('input:update', handleInputUpdate);
       socket.off('compilation:start', handleCompilationStart);
@@ -507,7 +545,7 @@ export const CodeEditorProvider = ({ children }) => {
   }, [socket, isConnected, user?._id]);
 
   // Update code function
-  const updateCode = useCallback((newCode, language = state.language) => {
+  const updateCode = useCallback((newCode, language = state.language, clearResults = false) => {
     if (!socket || !roomId) {
       console.warn('⚠️ No socket or roomId available for code update');
       return;
@@ -523,7 +561,8 @@ export const CodeEditorProvider = ({ children }) => {
       payload: { 
         code: newCode, 
         language,
-        updatedBy: user
+        updatedBy: user,
+        clearResults
       }
     });
 
@@ -566,7 +605,7 @@ export const CodeEditorProvider = ({ children }) => {
     }
   }, [socket, roomId, user]);
 
-  // NEW: Update program input (shared)
+  // Update program input (shared)
   const updateInput = useCallback((input) => {
     dispatch({ 
       type: 'SET_INPUT', 
@@ -589,31 +628,49 @@ export const CodeEditorProvider = ({ children }) => {
     }
   }, [socket, roomId, user]);
 
-  // Change language
+  // Change language with template insertion
   const changeLanguage = useCallback((newLanguage) => {
     if (!languageConfigs[newLanguage]) {
       console.error('❌ Unsupported language:', newLanguage);
       return;
     }
 
+    // First update the language
     dispatch({ type: 'SET_LANGUAGE', payload: newLanguage });
+    
+    // Then insert the template for the new language
+    const template = codeTemplates[newLanguage] || codeTemplates.cpp;
+    
+    dispatch({
+      type: 'INSERT_TEMPLATE',
+      payload: {
+        language: newLanguage,
+        updatedBy: user
+      }
+    });
     
     if (socket && roomId) {
       try {
+        // Emit both language change and template insertion
         socket.emit('code:update', {
           roomId,
-          code: state.code,
+          code: template,
           language: newLanguage
         });
         
-        console.log('🔄 Language changed to:', newLanguage);
+        socket.emit('template:insert', {
+          roomId,
+          language: newLanguage
+        });
+        
+        console.log('🔄 Language changed to:', newLanguage, 'with template');
       } catch (error) {
         console.error('❌ Failed to emit language change:', error);
       }
     }
-  }, [socket, roomId, state.code]);
+  }, [socket, roomId, user]);
 
-  // NEW: Enhanced compile and execute with shared results
+  // Enhanced compile and execute with shared results
   const compileAndExecute = useCallback(async () => {
     if (!state.code.trim()) {
       dispatch({
@@ -747,14 +804,17 @@ export const CodeEditorProvider = ({ children }) => {
     }
   }, [state.code, state.language, state.programInput, socket, roomId, user]);
 
-  // Insert template code
+  // Insert template code - FIXED VERSION
   const insertTemplate = useCallback((language = state.language) => {
     const template = codeTemplates[language] || codeTemplates.cpp;
     
+    console.log('📋 Inserting template for language:', language);
+    console.log('📋 Template content:', template.substring(0, 50) + '...');
+    
+    // Use the INSERT_TEMPLATE action instead of SET_CODE
     dispatch({
-      type: 'SET_CODE',
+      type: 'INSERT_TEMPLATE',
       payload: {
-        code: template,
         language,
         updatedBy: user
       }
@@ -762,11 +822,19 @@ export const CodeEditorProvider = ({ children }) => {
 
     if (socket && roomId) {
       try {
+        // Emit both the code update and template insertion event
         socket.emit('code:update', {
           roomId,
           code: template,
           language
         });
+        
+        socket.emit('template:insert', {
+          roomId,
+          language
+        });
+        
+        console.log('📤 Template insertion broadcasted');
       } catch (error) {
         console.error('❌ Failed to broadcast template insertion:', error);
       }
@@ -859,7 +927,11 @@ export const CodeEditorProvider = ({ children }) => {
     downloadCode,
     clearCompilationResults,
     getSupportedLanguages,
-    resetEditor
+    resetEditor,
+    
+    // Template utilities
+    getTemplate: (lang) => codeTemplates[lang] || codeTemplates.cpp,
+    getSupportedLanguagesList: () => Object.keys(codeTemplates)
   };
 
   return (
